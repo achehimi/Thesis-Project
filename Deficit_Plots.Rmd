@@ -1,0 +1,1881 @@
+---
+title: "deficit_Model_Plots"
+author: "Amani Chehimi"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide    
+    toc: true             
+    toc_float: true       
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(tidyverse)
+library(knitr)
+library(ggplot2)
+library(dplyr)
+library(lubridate)
+library(MMWRweek)
+library(gridExtra)
+library(readxl)
+library(excessmort)
+library(plotly)
+library(patchwork)
+library(scales)
+library(cowplot)
+```
+
+```{r}
+source("~/Desktop/Thesis Work/Hospitalization/11-26 data/Deficit_Model_1.0.R")
+```
+
+```{r}
+allcause_state_byweek <- read_excel("allcause_state_byweek_suppressed_25mar21.xlsx")
+icd10categories <- read_excel("icd10categories_updated_321.xlsx")
+
+#weekly state data
+all_cause_state_byweek <- allcause_state_byweek %>%
+  rename(weekly_count_statelevel = count)
+
+all_cause_state_by_week <- all_cause_state_byweek %>%
+  separate(mmwr_week, into = c("MMWRyear", "MMWRweek"), sep = "-", convert = TRUE) %>%
+  mutate(
+    date = MMWRweek2Date(MMWRyear = MMWRyear, MMWRweek = MMWRweek, MMWRday = 1),
+    statecount_numeric = as.numeric(ifelse(weekly_count_statelevel == "<5", NA, weekly_count_statelevel)),
+    statecount_suppressed = weekly_count_statelevel == "<5",
+    category = as.character(category)
+  )
+
+all_cause_state_by_week %>%
+  group_by(category) %>%
+  reframe(missing_total = sum(statecount_suppressed), 
+            count_total = sum(statecount_numeric, na.rm = TRUE))
+all_cause_state_by_week
+```
+
+```{r}
+str(icd10categories)
+names(icd10categories)
+dim(icd10categories)
+summary(icd10categories)
+sapply(icd10categories, class)
+glimpse(icd10categories)
+colSums(is.na(icd10categories))
+```
+
+```{r}
+str(allcause_state_byweek)
+names(allcause_state_byweek)
+dim(allcause_state_byweek)
+summary(allcause_state_byweek)
+sapply(allcause_state_byweek,class)
+glimpse(allcause_state_byweek)
+colSums(is.na(allcause_state_byweek))
+```
+
+#### Deficit Function Used
+
+```{r}
+deficit_cumulative <- function(fit, start, end){
+  if (!"curve_fit" %in% attr(fit, "type"))
+    stop("This is not the correct deficit_model fit, needs curve fit.")
+
+  ind             <- which(fit$date %in% seq(start, end, by = "day"))
+  n               <- length(ind) # returns the # of elements in the ind object
+  A               <- matrix(1, n, n)
+  A[upper.tri(A)] <- 0                                         # It sets all the upper triangular elements of matrix A (excluding the diagonal) to 0
+  A               <- sweep(A, 2, fit$expected[ind], FUN = "*") # This line multiplies each column (2 means columns) of the matrix A by a corresponding value from fit$expected[ind]
+                                                               # So, now it's scaling each column of A by expected values from the model fit (fit$expected[ind])
+  fhat <- matrix(fit$fitted[ind], ncol = 1)                    # creates a column vector (matrix with 1 column) called fhat from the values in fit$fitted[ind]
+
+ 
+   # Below, this code is constructing a data frame with:
+  
+  fit_deficit   <- A %*% fhat                                    # multiply design matrix A by fitted values fhat to get cumulative modeled effect.
+  obs_deficit   <- cumsum(fit$observed[ind] - fit$expected[ind])
+  varcov       <- fit$x[ind,] %*% fit$betacov %*% t(fit$x[ind,]) # Compute variance-covariance matrix of the linear predictor based on model design matrix x and estimated betacov
+  diag(varcov) <- fit$se[ind]^2                                  # Replace diagonal entries of varcov with squared standard errors — probably to correct for over/under-dispersion or model misspecification.
+  fitted_se    <- sqrt(diag(A %*%  varcov %*% t(A)))
+  sd           <- sqrt(diag(A %*% (fit$cov[ind,ind] + diag(fit$log_expected_se[ind]^2)) %*% t(A))) # this computes the variance of the observed cumulative deficit.
+                                                                                                   # It adds fit$cov (covariance of observed data) and extra uncertainty from fit$log_expected_se.
+  data.frame(date     = fit$date[ind], # The time points
+             observed = obs_deficit,   # Cumulative observed - expected difference
+             sd       = sd,            # Modeled cumulative deficit/excess from the model.
+             fitted   = fit_deficit,   # Standard deviation of the observed cumulative deficit.
+             se       = fitted_se)     # Standard error of the fitted cumulative deficit.
+}
+```
+
+## Deficit Model fits for the different categories
+
+### Cardio
+
+```{r}
+exclude_dates <- seq(lubridate::make_date(2020, 3, 1), 
+                     lubridate::make_date(2021, 2, 20), 
+                     by = "day")
+
+# cardiovascular data
+cardio <- all_cause_state_by_week %>%
+  filter(category == "cardiovascular") %>%
+    filter(!(MMWRyear == 2019 & MMWRweek == 1 | MMWRyear == 2025 & MMWRweek == 1)) %>%
+  mutate(population = 7001399, # given from https://www.census.gov/quickfacts/fact/table/MA/PST045223
+         outcome = statecount_numeric)
+
+# deficit model with COVID-19 dates excluded
+cardio_deficit <- compute_expected(cardio, 
+                               exclude = exclude_dates,
+                               frequency = 52)
+cardio_deficit
+
+cardio_deficit <- cardio_deficit %>%
+  mutate(date = as.Date(paste(MMWRyear, MMWRweek, 1, sep = "-"), "%Y-%U-%u"))
+```
+```{r}
+combined_plot_1 <- ggplot(cardio_deficit, aes(x = date)) +
+  geom_line(aes(y = expected), color = "blue", size = 1.5) +  # Expected outcome line
+  geom_point(aes(y = outcome, color = factor(excluded)), size = 2) +  # Observed outcomes
+  scale_color_manual(values = c("FALSE" = "green", "TRUE" = "red"),
+                     labels = c("Included in Model", "Excluded from Model")) +
+  labs(title = "Weekly Cardiovascular Hospitalizations in MA",
+       x = "Date",
+       y = "Outcome",
+       color = "Data Point Status") +
+  theme_minimal()
+
+combined_plot_1
+```
+
+
+```{r}
+fit_x <- cardio_deficit %>% 
+  deficit_model(exclude = exclude_dates,
+               start = as.Date("2019-01-14"),
+               end = as.Date("2024-12-31"),
+               knots.per.year = 12,
+               verbose = FALSE)
+
+# -- Visualizing deviations from expected hospitalization in Massachusetts
+deficit_plot_x <- excess_plot(fit_x, 
+            title = "Deviations from Expected Counts for Cardio in MA"
+)
+deficit_plot_x
+fit_x$detected_intervals
+```
+
+```{r}
+# -- Computing excess Hospitilization counts in Massachusetts from March 1, 2020 to May 9, 2020
+cumulative_deficit  <- deficit_cumulative(fit_x, 
+                                        start = make_date(2020, 03, 01),
+                                        end   = make_date(2024, 12, 28))
+
+# -- Visualizing cumulative excess deaths in MA
+cumulative_deficit_plot_1 <- cumulative_deficit %>%
+  ggplot(aes(date)) +
+  geom_ribbon(aes(ymin = observed- 2*sd, ymax = observed + 2*sd), alpha = 0.5) +
+  geom_line(aes(y = observed),
+            color = "white",
+            size  = 1) +
+  geom_line(aes(y = observed)) +
+  geom_point(aes(y = observed)) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(x        = "Date",
+       y        = "Cumulative Deficit Hospitilization-Cardio",
+       title    = "Cumulative Deficit Hospitilization for Cardio Cases in MA",
+       subtitle = "During the first wave of Covid-19")
+cumulative_deficit_plot_1
+```
+
+
+
+```{r}
+library(patchwork)
+
+x_limits <- as.Date(c("2019-01-01", "2025-01-01"))
+x_breaks <- seq(from = x_limits[1], to = x_limits[2], by = "1 year")
+
+
+combined_plot_1_adj <- combined_plot_1 +
+  theme(legend.position = "bottom",
+        legend.justification = c(1, 0),
+        legend.box.just = "right") +
+  labs(x = NULL) +
+  scale_x_date(limits = x_limits, breaks = x_breaks, date_labels = "%Y")
+
+deficit_plot_x_adj <- deficit_plot_x +
+  labs(x = NULL) +
+  scale_x_date(limits = x_limits, breaks = x_breaks, date_labels = "%Y")
+
+cumulative_deficit_plot_1_adj <- cumulative_deficit_plot_1 +
+  labs(x = NULL) +
+  scale_x_date(limits = x_limits, breaks = x_breaks, date_labels = "%Y")
+
+final_combined_plot_1 <- combined_plot_1_adj /
+                       deficit_plot_x_adj /
+                       cumulative_deficit_plot_1_adj +
+  plot_layout(ncol = 1, heights = c(1, 1, 1))
+
+
+final_combined_plot_1
+
+
+ggsave("Cardio_combined_figure.png",
+       plot = final_combined_plot_1,
+       width = 11,      
+       height = 10.5,    
+       dpi = 300,
+       bg = "white")
+```
+
+```{r}
+ggsave("cardio_combined_figure.png",
+       plot = final_combined_plot_1,
+       width = 11,       # good for standard document width
+       height = 10.5,    # leaves space for three stacked plots
+       dpi = 300,
+       bg = "white")
+```
+
+
+
+### Digestive
+
+```{r}
+# COVID-19 exclusion dates
+exclude_dates <- seq(lubridate::make_date(2020, 3, 1), 
+                     lubridate::make_date(2021, 2, 27), 
+                     by = "day")
+
+# digestive data
+digestive <- all_cause_state_by_week %>%
+  filter(category == "digestive") %>%
+    filter(!(MMWRyear == 2019 & MMWRweek == 1 | MMWRyear == 2025 & MMWRweek == 1)) %>%
+  mutate(population = 7001399, # given from https://www.census.gov/quickfacts/fact/table/MA/PST045223
+         outcome = statecount_numeric)
+
+# excess model with COVID-19 dates excluded
+digestive_deficit <- compute_expected(digestive, 
+                               exclude = exclude_dates,
+                               frequency = 52)
+digestive_deficit
+```
+
+```{r}
+# Plotting
+combined_plot_2 <- ggplot(digestive_deficit, aes(x = date)) +
+  geom_line(aes(y = expected), color = "blue", size = 1.5) +  # Expected outcome line
+  geom_point(aes(y = outcome, color = factor(excluded)), size = 2) +  # Observed outcomes
+  scale_color_manual(values = c("FALSE" = "green", "TRUE" = "red"),
+                     labels = c("Included in Model", "Excluded from Model")) +
+  labs(title = "Weekly digestive ED Hospitilizations in MA",
+       x = "Date",
+       y = "Outcome",
+       color = "Data Point Status") +
+  theme_minimal()
+
+combined_plot_2
+```
+
+
+```{r}
+fit_2x <- digestive_deficit %>% 
+  deficit_model(exclude = exclude_dates,
+               start = min(.$date),
+               end = max(.$date),
+               knots.per.year = 12,
+               verbose = FALSE)
+
+# -- Visualizing deviations from expected hospitalization in Massachusetts
+deficit_plot_2x <- excess_plot(fit_2x, 
+            title = "Deviations from Expected Counts for Digestive in MA"
+)
+deficit_plot_2x
+
+fit_2x$detected_intervals
+```
+
+```{r}
+# -- Computing excess Hospitilization counts in Massachusetts from March 1, 2020 to May 9, 2020
+cumulative_deficit  <- deficit_cumulative(fit_2x, 
+                                        start = make_date(2020, 03, 01),
+                                        end   = make_date(2024, 12, 28))
+
+# -- Visualizing cumulative excess deaths in MA
+cumulative_deficit_plot_2 <- cumulative_deficit %>%
+  ggplot(aes(date)) +
+  geom_ribbon(aes(ymin = observed- 2*sd, ymax = observed + 2*sd), alpha = 0.5) +
+  geom_line(aes(y = observed),
+            color = "white",
+            size  = 1) +
+  geom_line(aes(y = observed)) +
+  geom_point(aes(y = observed)) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(x        = "Date",
+       y        = "Cumulative Deficit Hospitilization-Digestive",
+       title    = "Cumulative Deficit Hospitilization for Digestive Cases in MA",
+       subtitle = "During the first wave of Covid-19")
+cumulative_deficit_plot_2
+```
+
+```{r}
+library(patchwork)
+
+x_limits <- as.Date(c("2019-01-01", "2025-01-01"))
+x_breaks <- seq(from = x_limits[1], to = x_limits[2], by = "1 year")
+
+
+combined_plot_2_adj <- combined_plot_2 +
+  theme(legend.position = "bottom",
+        legend.justification = c(1, 0),
+        legend.box.just = "right") +
+  labs(x = NULL) +
+  scale_x_date(limits = x_limits, breaks = x_breaks, date_labels = "%Y")
+
+deficit_plot_2x_adj <- deficit_plot_2x +
+  labs(x = NULL) +
+  scale_x_date(limits = x_limits, breaks = x_breaks, date_labels = "%Y")
+
+cumulative_deficit_plot_2_adj <- cumulative_deficit_plot_2 +
+  labs(x = NULL) +
+  scale_x_date(limits = x_limits, breaks = x_breaks, date_labels = "%Y")
+
+final_combined_plot_2 <- combined_plot_2_adj /
+                       deficit_plot_2x_adj /
+                       cumulative_deficit_plot_2_adj +
+  plot_layout(ncol = 1, heights = c(1, 1, 1))
+
+
+final_combined_plot_2
+ggsave("Digestive_combined_figure.png",
+       plot = final_combined_plot_2,
+       width = 11,      
+       height = 10.5,    
+       dpi = 300,
+       bg = "white")
+```
+
+
+### Infectious
+
+```{r}
+# COVID-19 exclusion dates
+exclude_dates <- seq(lubridate::make_date(2020, 3, 1), 
+                     lubridate::make_date(2021, 6, 5), 
+                     by = "day")
+
+# infectious data
+infectious <- all_cause_state_by_week %>%
+  filter(category == "infectious") %>%
+    filter(!(MMWRyear == 2019 & MMWRweek == 1 | MMWRyear == 2025 & MMWRweek == 1)) %>%
+  mutate(population = 7001399, # given from https://www.census.gov/quickfacts/fact/table/MA/PST045223
+         outcome = statecount_numeric)
+
+# deficit model with COVID-19 dates excluded
+infectious_deficit <- compute_expected(infectious,
+                               exclude = exclude_dates,
+                               frequency = 52)
+```
+
+```{r}
+# Plotting
+combined_plot_3 <- ggplot(infectious_deficit, aes(x = date)) +
+  geom_line(aes(y = expected), color = "blue", size = 1.5) +  # Expected outcome line
+  geom_point(aes(y = outcome, color = factor(excluded)), size = 2) +  # Observed outcomes
+  scale_color_manual(values = c("FALSE" = "green", "TRUE" = "red"),
+                     labels = c("Included in Model", "Excluded from Model")) +
+  labs(title = "Weekly Infectious ED Hospitilizations in MA",
+       x = "Date",
+       y = "Outcome",
+       color = "Data Point Status") +
+  theme_minimal()
+combined_plot_3
+```
+
+
+```{r}
+fit_3x <- infectious_deficit %>% 
+  deficit_model(exclude = exclude_dates,
+               start = as.Date("2020-03-01"),
+               end = as.Date("2024-12-31"),
+               knots.per.year = 12,
+               verbose = FALSE)
+
+deficit_plot_3x <- excess_plot(fit_3x, 
+            title = "Deviations from Expected Counts for Infectious in MA"
+)
+deficit_plot_3x
+
+fit_3x$detected_intervals
+```
+
+```{r}
+# -- Computing excess Hospitilization counts in Massachusetts from March 1, 2020 to May 9, 2020
+cumulative_deficit  <- deficit_cumulative(fit_3x, 
+                                        start = make_date(2020, 03, 01),
+                                        end   = make_date(2024, 12, 28))
+
+# -- Visualizing cumulative excess deaths in MA
+cumulative_deficit_plot_3 <- cumulative_deficit %>%
+  ggplot(aes(date)) +
+  geom_ribbon(aes(ymin = observed- 2*sd, ymax = observed + 2*sd), alpha = 0.5) +
+  geom_line(aes(y = observed),
+            color = "white",
+            size  = 1) +
+  geom_line(aes(y = observed)) +
+  geom_point(aes(y = observed)) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(x        = "Date",
+       y        = "Cumulative Deficit Hospitilization-Infectious",
+       title    = "Cumulative Deficit Hospitilization for Infectious Cases in MA",
+       subtitle = "During the first wave of Covid-19")
+cumulative_deficit_plot_3
+```
+
+```{r}
+library(patchwork)
+
+x_limits <- as.Date(c("2019-01-01", "2025-01-01"))
+x_breaks <- seq(from = x_limits[1], to = x_limits[2], by = "1 year")
+
+
+combined_plot_3_adj <- combined_plot_3 +
+  theme(legend.position = "bottom",
+        legend.justification = c(1, 0),
+        legend.box.just = "right") +
+  labs(x = NULL) +
+  scale_x_date(limits = x_limits, breaks = x_breaks, date_labels = "%Y")
+
+deficit_plot_3x_adj <- deficit_plot_3x +
+  labs(x = NULL) +
+  scale_x_date(limits = x_limits, breaks = x_breaks, date_labels = "%Y")
+
+cumulative_deficit_plot_3_adj <- cumulative_deficit_plot_3 +
+  labs(x = NULL) +
+  scale_x_date(limits = x_limits, breaks = x_breaks, date_labels = "%Y")
+
+final_combined_plot_3 <- combined_plot_3_adj /
+                       deficit_plot_3x_adj /
+                       cumulative_deficit_plot_3_adj +
+  plot_layout(ncol = 1, heights = c(1, 1, 1))
+
+
+final_combined_plot_3
+
+ggsave("Infectious_combined_figure.png",
+       plot = final_combined_plot_2,
+       width = 11,       
+       height = 10.5,    
+       dpi = 300,
+       bg = "white")
+```
+
+
+### infectious_respiratory
+
+```{r}
+# COVID-19 exclusion dates
+exclude_dates <- seq(lubridate::make_date(2020, 3, 1), 
+                     lubridate::make_date(2021, 6, 12), 
+                     by = "day")
+
+# infectious respiratory data
+infectious_respiratory <- all_cause_state_by_week %>%
+  filter(category == "infectious respiratory") %>%
+    filter(!(MMWRyear == 2019 & MMWRweek == 1 | MMWRyear == 2025 & MMWRweek == 1)) %>%
+  mutate(population = 7001399, # given from https://www.census.gov/quickfacts/fact/table/MA/PST045223
+         outcome = statecount_numeric)
+
+# excess model with COVID-19 dates excluded
+infectious_respiratory_deficit <- compute_expected(infectious_respiratory,
+                               exclude = exclude_dates,
+                               frequency = 52)
+```
+
+```{r}
+# Plotting
+combined_plot_4 <- ggplot(infectious_respiratory_deficit, aes(x = date)) +
+  geom_line(aes(y = expected), color = "blue", size = 1.5) +  # Expected outcome line
+  geom_point(aes(y = outcome, color = factor(excluded)), size = 2) +  # Observed outcomes
+  scale_color_manual(values = c("FALSE" = "green", "TRUE" = "red"),
+                     labels = c("Included in Model", "Excluded from Model")) +
+  labs(title = "Weekly Infectious Respiratory ED Hospitilizations in MA",
+       x = "Date",
+       y = "Outcome",
+       color = "Data Point Status") +
+  theme_minimal()
+combined_plot_4
+```
+
+
+
+```{r}
+# -- Fitting excess model
+fit_4x <- infectious_respiratory_deficit %>% 
+  deficit_model(exclude = exclude_dates,
+               start = as.Date("2020-03-01"),
+               end = as.Date("2025-12-31"),
+               knots.per.year = 12,
+               verbose = FALSE)
+
+# -- Visualizing deviations from expected hospitalization in Massachusetts
+deficit_plot_4x <- excess_plot(fit_4x, 
+            title = "Deviations from Expected Counts for Infectious Respiratory in MA"
+)
+deficit_plot_4x
+# -- Intervals of inordinate mortality found by the excess model
+fit_4x$detected_intervals
+```
+
+
+```{r}
+# -- Computing excess Hospitilization counts in Massachusetts from March 1, 2020 to May 9, 2020
+cumulative_deficit  <- deficit_cumulative(fit_4x, 
+                                        start = make_date(2020, 03, 01),
+                                        end   = make_date(2024, 12, 28))
+
+# -- Visualizing cumulative excess deaths in MA
+cumulative_deficit_plot_4 <- cumulative_deficit %>%
+  ggplot(aes(date)) +
+  geom_ribbon(aes(ymin = observed- 2*sd, ymax = observed + 2*sd), alpha = 0.5) +
+  geom_line(aes(y = observed),
+            color = "white",
+            size  = 1) +
+  geom_line(aes(y = observed)) +
+  geom_point(aes(y = observed)) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(x        = "Date",
+       y        = "Cumulative Deficit Hospitilization-infectious respiratory",
+       title    = "Cumulative Deficit Hospitilization for infectious respiratory Cases in MA",
+       subtitle = "During the first wave of Covid-19")
+cumulative_deficit_plot_4
+```
+
+```{r}
+library(patchwork)
+
+x_limits <- as.Date(c("2019-01-01", "2025-01-01"))
+x_breaks <- seq(from = x_limits[1], to = x_limits[2], by = "1 year")
+
+
+combined_plot_4_adj <- combined_plot_4 +
+  theme(legend.position = "bottom",
+        legend.justification = c(1, 0),
+        legend.box.just = "right") +
+  labs(x = NULL) +
+  scale_x_date(limits = x_limits, breaks = x_breaks, date_labels = "%Y")
+
+deficit_plot_4x_adj <- deficit_plot_4x +
+  labs(x = NULL) +
+  scale_x_date(limits = x_limits, breaks = x_breaks, date_labels = "%Y")
+
+cumulative_deficit_plot_4_adj <- cumulative_deficit_plot_4 +
+  labs(x = NULL) +
+  scale_x_date(limits = x_limits, breaks = x_breaks, date_labels = "%Y")
+
+final_combined_plot_4 <- combined_plot_4_adj /
+                       deficit_plot_4x_adj /
+                       cumulative_deficit_plot_4_adj +
+  plot_layout(ncol = 1, heights = c(1, 1, 1))
+
+
+final_combined_plot_4
+
+ggsave("Infectious Respiratory_combined_figure.png",
+       plot = final_combined_plot_4,
+       width = 11,       # good for standard document width
+       height = 10.5,    # leaves space for three stacked plots
+       dpi = 300,
+       bg = "white")
+```
+
+
+
+
+### injury
+
+```{r}
+# COVID-19 exclusion dates
+exclude_dates <- seq(lubridate::make_date(2020, 3, 1), 
+                     lubridate::make_date(2021, 4, 10), 
+                     by = "day")
+
+# injury data
+injury <- all_cause_state_by_week %>%
+  filter(category == "injury") %>%
+    filter(!(MMWRyear == 2019 & MMWRweek == 1 | MMWRyear == 2025 & MMWRweek == 1)) %>%
+  mutate(population = 7001399, # given from https://www.census.gov/quickfacts/fact/table/MA/PST045223
+         outcome = statecount_numeric)
+
+# excess model with COVID-19 dates excluded
+injury_deficit <- compute_expected(injury,
+                               exclude = exclude_dates,
+                               frequency = 52)
+```
+
+```{r}
+# Plotting
+combined_plot_5 <- ggplot(injury_deficit, aes(x = date)) +
+  geom_line(aes(y = expected), color = "blue", size = 1.5) +  # Expected outcome line
+  geom_point(aes(y = outcome, color = factor(excluded)), size = 2) +  # Observed outcomes
+  scale_color_manual(values = c("FALSE" = "green", "TRUE" = "red"),
+                     labels = c("Included in Model", "Excluded from Model")) +
+  labs(title = "Weekly Injury ED Hospitilizations in MA",
+       x = "Date",
+       y = "Outcome",
+       color = "Data Point Status") +
+  theme_minimal()
+combined_plot_5
+```
+
+```{r}
+# -- Fitting excess model
+fit_5x <- injury_deficit %>%                                                     
+  deficit_model(exclude = exclude_dates,
+               start = as.Date("2020-03-01"),
+               end = as.Date("2024-12-31"),
+               knots.per.year = 12,
+               verbose = FALSE)
+
+# -- Visualizing deviations from expected hospitalization in Massachusetts
+deficit_plot_5x <- excess_plot(fit_5x, 
+            title = "Deviations from Expected Counts for Injuries in MA"
+)
+deficit_plot_5x
+# -- Intervals of inordinate mortality found by the excess model
+fit_5x$detected_intervals
+```
+
+
+```{r}
+# -- Computing excess Hospitilization counts in Massachusetts from March 1, 2020 to May 9, 2020
+cumulative_deficit  <- deficit_cumulative(fit_5x, 
+                                        start = make_date(2020, 03, 01),
+                                        end   = make_date(2024, 12, 28))
+
+# -- Visualizing cumulative excess deaths in MA
+cumulative_deficit_plot_5 <- cumulative_deficit %>%
+  ggplot(aes(date)) +
+  geom_ribbon(aes(ymin = observed- 2*sd, ymax = observed + 2*sd), alpha = 0.5) +
+  geom_line(aes(y = observed),
+            color = "white",
+            size  = 1) +
+  geom_line(aes(y = observed)) +
+  geom_point(aes(y = observed)) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(x        = "Date",
+       y        = "Cumulative Deficit Hospitilization-Injury",
+       title    = "Cumulative Deficit Hospitilization for Injury Cases in MA",
+       subtitle = "During the first wave of Covid-19")
+cumulative_deficit_plot_5
+```
+
+```{r}
+library(patchwork)
+
+x_limits <- as.Date(c("2019-01-01", "2025-01-01"))
+x_breaks <- seq(from = x_limits[1], to = x_limits[2], by = "1 year")
+
+
+combined_plot_5_adj <- combined_plot_5 +
+  theme(legend.position = "bottom",
+        legend.justification = c(1, 0),
+        legend.box.just = "right") +
+  labs(x = NULL) +
+  scale_x_date(limits = x_limits, breaks = x_breaks, date_labels = "%Y")
+
+deficit_plot_5x_adj <- deficit_plot_5x +
+  labs(x = NULL) +
+  scale_x_date(limits = x_limits, breaks = x_breaks, date_labels = "%Y")
+
+cumulative_deficit_plot_5_adj <- cumulative_deficit_plot_5 +
+  labs(x = NULL) +
+  scale_x_date(limits = x_limits, breaks = x_breaks, date_labels = "%Y")
+
+final_combined_plot_5 <- combined_plot_5_adj /
+                       deficit_plot_5x_adj /
+                       cumulative_deficit_plot_5_adj +
+  plot_layout(ncol = 1, heights = c(1, 1, 1))
+
+
+final_combined_plot_5
+
+ggsave("Injury_combined_figure.png",
+       plot = final_combined_plot_5,
+       width = 11,       # good for standard document width
+       height = 10.5,    # leaves space for three stacked plots
+       dpi = 300,
+       bg = "white")
+```
+
+
+### pneumonia
+
+
+```{r}
+# COVID-19 exclusion dates
+exclude_dates <- seq(lubridate::make_date(2020, 3, 1), 
+                     lubridate::make_date(2022, 5, 7), 
+                     by = "day")
+
+# pneumonia data
+pneumonia <- all_cause_state_by_week %>%
+  filter(category == "pneumonia") %>%
+    filter(!(MMWRyear == 2019 & MMWRweek == 1 | MMWRyear == 2025 & MMWRweek == 1)) %>%
+  mutate(population = 7001399, # given from https://www.census.gov/quickfacts/fact/table/MA/PST045223
+         outcome = statecount_numeric)
+
+# excess model with COVID-19 dates excluded
+pneumonia_deficit <- compute_expected(pneumonia,
+                               exclude = exclude_dates,
+                               frequency = 52)
+```
+
+
+```{r}
+# Plotting
+combined_plot_6 <- ggplot(pneumonia_deficit, aes(x = date)) +
+  geom_line(aes(y = expected), color = "blue", size = 1.5) +  # Expected outcome line
+  geom_point(aes(y = outcome, color = factor(excluded)), size = 2) +  # Observed outcomes
+  scale_color_manual(values = c("FALSE" = "green", "TRUE" = "red"),
+                     labels = c("Included in Model", "Excluded from Model")) +
+  labs(title = "Weekly Pneumonia ED Hospitilizations in MA",
+       x = "Date",
+       y = "Outcome",
+       color = "Data Point Status") +
+  theme_minimal()
+combined_plot_6
+```
+
+
+```{r}
+# -- Fitting excess model
+fit_6x <- pneumonia_deficit %>% 
+  deficit_model(exclude = exclude_dates,
+               start = as.Date("2020-03-01"),
+               end = as.Date("2024-12-31"),
+               knots.per.year = 12,
+               verbose = FALSE)
+
+# -- Visualizing deviations from expected hospitalization in Massachusetts
+deficit_plot_6x <- excess_plot(fit_6x, 
+            title = "Deviations from Expected Counts for Pneumonia in MA"
+)
+deficit_plot_6x
+# -- Intervals of inordinate mortality found by the excess model
+fit_6x$detected_intervals
+```
+
+```{r}
+# -- Computing excess Hospitilization counts in Massachusetts from March 1, 2020 to May 9, 2020
+cumulative_deficit  <- deficit_cumulative(fit_6x, 
+                                        start = make_date(2020, 03, 01),
+                                        end   = make_date(2024, 12, 28))
+
+# -- Visualizing cumulative excess deaths in MA
+cumulative_deficit_plot_6 <- cumulative_deficit %>%
+  ggplot(aes(date)) +
+  geom_ribbon(aes(ymin = observed- 2*sd, ymax = observed + 2*sd), alpha = 0.5) +
+  geom_line(aes(y = observed),
+            color = "white",
+            size  = 1) +
+  geom_line(aes(y = observed)) +
+  geom_point(aes(y = observed)) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(x        = "Date",
+       y        = "Cumulative Deficit Hospitilization-pneumonia",
+       title    = "Cumulative Deficit Hospitilization for pneumonia Cases in MA",
+       subtitle = "During the first wave of Covid-19")
+cumulative_deficit_plot_6
+```
+
+```{r}
+library(patchwork)
+
+x_limits <- as.Date(c("2019-01-01", "2025-01-01"))
+x_breaks <- seq(from = x_limits[1], to = x_limits[2], by = "1 year")
+
+
+combined_plot_6_adj <- combined_plot_6 +
+  theme(legend.position = "bottom",
+        legend.justification = c(1, 0),
+        legend.box.just = "right") +
+  labs(x = NULL) +
+  scale_x_date(limits = x_limits, breaks = x_breaks, date_labels = "%Y")
+
+deficit_plot_6x_adj <- deficit_plot_6x +
+  labs(x = NULL) +
+  scale_x_date(limits = x_limits, breaks = x_breaks, date_labels = "%Y")
+
+cumulative_deficit_plot_6_adj <- cumulative_deficit_plot_6 +
+  labs(x = NULL) +
+  scale_x_date(limits = x_limits, breaks = x_breaks, date_labels = "%Y")
+
+final_combined_plot_6 <- combined_plot_6_adj /
+                       deficit_plot_6x_adj /
+                       cumulative_deficit_plot_6_adj +
+  plot_layout(ncol = 1, heights = c(1, 1, 1))
+
+
+final_combined_plot_6
+
+ggsave("Pneumonia_combined_figure.png",
+       plot = final_combined_plot_6,
+       width = 11,       
+       height = 10.5,    
+       dpi = 300,
+       bg = "white")
+```
+
+
+### Renal 
+
+```{r}
+# COVID-19 exclusion dates
+exclude_dates <- seq(lubridate::make_date(2020, 3, 1), 
+                     lubridate::make_date(2021, 2, 27), 
+                     by = "day")
+
+# renal data
+renal <- all_cause_state_by_week %>%
+  filter(category == "renal") %>%
+    filter(!(MMWRyear == 2019 & MMWRweek == 1 | MMWRyear == 2025 & MMWRweek == 1)) %>%
+  mutate(population = 7001399, # given from https://www.census.gov/quickfacts/fact/table/MA/PST045223
+         outcome = statecount_numeric)
+
+# excess model with COVID-19 dates excluded
+renal_deficit <- compute_expected(renal,
+                               exclude = exclude_dates,
+                               frequency = 52)
+```
+
+```{r}
+# Plotting
+combined_plot_7 <- ggplot(renal_deficit, aes(x = date)) +
+  geom_line(aes(y = expected), color = "blue", size = 1.5) +  # Expected outcome line
+  geom_point(aes(y = outcome, color = factor(excluded)), size = 2) +  # Observed outcomes
+  scale_color_manual(values = c("FALSE" = "green", "TRUE" = "red"),
+                     labels = c("Included in Model", "Excluded from Model")) +
+  labs(title = "Weekly Renal ED Hospitilizations in MA",
+       x = "Date",
+       y = "Outcome",
+       color = "Data Point Status") +
+  theme_minimal()
+combined_plot_7
+```
+
+
+
+```{r}
+# -- Fitting excess model
+fit_7x <- renal_deficit %>% 
+  deficit_model(exclude = exclude_dates,
+               start = as.Date("2020-03-01"),
+               end = as.Date("2024-12-31"),
+               knots.per.year = 12,
+               verbose = FALSE)
+
+# -- Visualizing deviations from expected hospitalization in Massachusetts
+deficit_plot_7x <- excess_plot(fit_7x, 
+            title = "Deviations from Expected Counts for Renal in MA"
+)
+deficit_plot_7x
+# -- Intervals of inordinate mortality found by the excess model
+fit_7x$detected_intervals
+```
+
+```{r}
+# -- Computing excess Hospitilization counts in Massachusetts from March 1, 2020 to May 9, 2020
+cumulative_deficit  <- deficit_cumulative(fit_7x, 
+                                        start = make_date(2020, 03, 01),
+                                        end   = make_date(2024, 12, 28))
+
+# -- Visualizing cumulative excess deaths in MA
+cumulative_deficit_plot_7 <- cumulative_deficit %>%
+  ggplot(aes(date)) +
+  geom_ribbon(aes(ymin = observed- 2*sd, ymax = observed + 2*sd), alpha = 0.5) +
+  geom_line(aes(y = observed),
+            color = "white",
+            size  = 1) +
+  geom_line(aes(y = observed)) +
+  geom_point(aes(y = observed)) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(x        = "Date",
+       y        = "Cumulative Deficit Hospitilization-renal",
+       title    = "Cumulative Deficit Hospitilization for renal Cases in MA",
+       subtitle = "During the first wave of Covid-19")
+cumulative_deficit_plot_7
+```
+
+```{r}
+library(patchwork)
+
+x_limits <- as.Date(c("2019-01-01", "2025-01-01"))
+x_breaks <- seq(from = x_limits[1], to = x_limits[2], by = "1 year")
+
+
+combined_plot_7_adj <- combined_plot_7 +
+  theme(legend.position = "bottom",
+        legend.justification = c(1, 0),
+        legend.box.just = "right") +
+  labs(x = NULL) +
+  scale_x_date(limits = x_limits, breaks = x_breaks, date_labels = "%Y")
+
+deficit_plot_7x_adj <- deficit_plot_7x +
+  labs(x = NULL) +
+  scale_x_date(limits = x_limits, breaks = x_breaks, date_labels = "%Y")
+
+cumulative_deficit_plot_7_adj <- cumulative_deficit_plot_7 +
+  labs(x = NULL) +
+  scale_x_date(limits = x_limits, breaks = x_breaks, date_labels = "%Y")
+
+final_combined_plot_7 <- combined_plot_7_adj /
+                       deficit_plot_7x_adj /
+                       cumulative_deficit_plot_7_adj +
+  plot_layout(ncol = 1, heights = c(1, 1, 1))
+
+
+final_combined_plot_7
+
+
+ggsave("Renal_combined_figure.png",
+       plot = final_combined_plot_7,
+       width = 11,       # good for standard document width
+       height = 10.5,    # leaves space for three stacked plots
+       dpi = 300,
+       bg = "white")
+```
+
+### Respiratory
+
+```{r}
+# COVID-19 exclusion dates
+exclude_dates <- seq(lubridate::make_date(2020, 3, 1), 
+                     lubridate::make_date(2021, 6, 12), 
+                     by = "day")
+
+# respiratory data
+respiratory <- all_cause_state_by_week %>%
+  filter(category == "respiratory") %>%
+    filter(!(MMWRyear == 2019 & MMWRweek == 1 | MMWRyear == 2025 & MMWRweek == 1)) %>%
+  mutate(population = 7001399, # given from https://www.census.gov/quickfacts/fact/table/MA/PST045223
+         outcome = statecount_numeric)
+
+# excess model with COVID-19 dates excluded
+respiratory_deficit <- compute_expected(respiratory,
+                               exclude = exclude_dates,
+                               frequency = 52)
+```
+
+```{r}
+# Plotting
+combined_plot_8 <- ggplot(respiratory_deficit, aes(x = date)) +
+  geom_line(aes(y = expected), color = "blue", size = 1.5) +  # Expected outcome line
+  geom_point(aes(y = outcome, color = factor(excluded)), size = 2) +  # Observed outcomes
+  scale_color_manual(values = c("FALSE" = "green", "TRUE" = "red"),
+                     labels = c("Included in Model", "Excluded from Model")) +
+  labs(title = "Weekly Respiratory ED Hospitilizations in MA",
+       x = "Date",
+       y = "Outcome",
+       color = "Data Point Status") +
+  theme_minimal()
+combined_plot_8
+```
+
+
+```{r}
+# -- Fitting excess model
+fit_8x <- respiratory_deficit %>% 
+  deficit_model(exclude = exclude_dates,
+               start = as.Date("2020-03-01"),
+               end = as.Date("2024-12-31"),
+               knots.per.year = 12,
+               verbose = FALSE)
+
+# -- Visualizing deviations from expected hospitalization in Massachusetts
+deficit_plot_8x <- excess_plot(fit_8x, 
+            title = "Deviations from Expected Counts for Respiratory in MA"
+)
+deficit_plot_8x
+# -- Intervals of inordinate mortality found by the excess model
+fit_8x$detected_intervals
+```
+
+
+```{r}
+# -- Computing excess Hospitilization counts in Massachusetts from March 1, 2020 to May 9, 2020
+cumulative_deficit  <- deficit_cumulative(fit_8x, 
+                                        start = make_date(2020, 03, 01),
+                                        end   = make_date(2024, 12, 28))
+
+# -- Visualizing cumulative excess deaths in MA
+cumulative_deficit_plot_8 <- cumulative_deficit %>%
+  ggplot(aes(date)) +
+  geom_ribbon(aes(ymin = observed- 2*sd, ymax = observed + 2*sd), alpha = 0.5) +
+  geom_line(aes(y = observed),
+            color = "white",
+            size  = 1) +
+  geom_line(aes(y = observed)) +
+  geom_point(aes(y = observed)) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(x        = "Date",
+       y        = "Cumulative Deficit Hospitilization-respiratory",
+       title    = "Cumulative Deficit Hospitilization for respiratory Cases in MA",
+       subtitle = "During the first wave of Covid-19")
+cumulative_deficit_plot_8
+```
+
+```{r}
+library(patchwork)
+
+x_limits <- as.Date(c("2019-01-01", "2025-01-01"))
+x_breaks <- seq(from = x_limits[1], to = x_limits[2], by = "1 year")
+
+
+combined_plot_8_adj <- combined_plot_8 +
+  theme(legend.position = "bottom",
+        legend.justification = c(1, 0),
+        legend.box.just = "right") +
+  labs(x = NULL) +
+  scale_x_date(limits = x_limits, breaks = x_breaks, date_labels = "%Y")
+
+deficit_plot_8x_adj <- deficit_plot_8x +
+  labs(x = NULL) +
+  scale_x_date(limits = x_limits, breaks = x_breaks, date_labels = "%Y")
+
+cumulative_deficit_plot_8_adj <- cumulative_deficit_plot_8 +
+  labs(x = NULL) +
+  scale_x_date(limits = x_limits, breaks = x_breaks, date_labels = "%Y")
+
+final_combined_plot_8 <- combined_plot_8_adj /
+                       deficit_plot_8x_adj /
+                       cumulative_deficit_plot_8_adj +
+  plot_layout(ncol = 1, heights = c(1, 1, 1))
+
+
+final_combined_plot_8
+
+ggsave("Respiratory_combined_figure.png",
+       plot = final_combined_plot_8,
+       width = 11,      
+       height = 10.5,   
+       dpi = 300,
+       bg = "white")
+```
+
+
+### other
+
+```{r}
+# COVID-19 exclusion dates
+exclude_dates <- seq(lubridate::make_date(2020, 3, 1), 
+                     lubridate::make_date(2021, 6, 5), 
+                     by = "day")
+
+# other data
+other <- all_cause_state_by_week %>%
+  filter(category == "other") %>%
+    filter(!(MMWRyear == 2019 & MMWRweek == 1 | MMWRyear == 2025 & MMWRweek == 1)) %>%
+  mutate(population = 7001399, # given from https://www.census.gov/quickfacts/fact/table/MA/PST045223
+         outcome = statecount_numeric)
+
+# excess model with COVID-19 dates excluded
+other_deficit <- compute_expected(other,
+                               exclude = exclude_dates,
+                               frequency = 52)
+```
+
+```{r}
+# Plotting
+combined_plot_9 <- ggplot(other_deficit, aes(x = date)) +
+  geom_line(aes(y = expected), color = "blue", size = 1.5) +  # Expected outcome line
+  geom_point(aes(y = outcome, color = factor(excluded)), size = 2) +  # Observed outcomes
+  scale_color_manual(values = c("FALSE" = "green", "TRUE" = "red"),
+                     labels = c("Included in Model", "Excluded from Model")) +
+  labs(title = "Weekly Other ED Hospitilizations in MA",
+       x = "Date",
+       y = "Outcome",
+       color = "Data Point Status") +
+  theme_minimal()
+combined_plot_9
+```
+
+
+```{r}
+# -- Fitting excess model
+fit_9x <-  other_deficit %>% 
+  deficit_model(exclude = exclude_dates,
+               start = as.Date("2020-03-01"),
+               end = as.Date("2024-12-31"),
+               knots.per.year = 12,
+               verbose = FALSE)
+
+# -- Visualizing deviations from expected hospitalization in Massachusetts
+deficit_plot_9x <- excess_plot(fit_9x, 
+            title = "Deviations from Expected Counts for Other in MA"
+)
+deficit_plot_9x
+# -- Intervals of inordinate mortality found by the excess model
+fit_9x$detected_intervals
+```
+
+```{r}
+# -- Computing excess Hospitilization counts in Massachusetts from March 1, 2020 to May 9, 2020
+cumulative_deficit  <- deficit_cumulative(fit_9x, 
+                                        start = make_date(2020, 03, 01),
+                                        end   = make_date(2024, 12, 28))
+
+# -- Visualizing cumulative excess deaths in MA
+cumulative_deficit_plot_9 <- cumulative_deficit %>%
+  ggplot(aes(date)) +
+  geom_ribbon(aes(ymin = observed- 2*sd, ymax = observed + 2*sd), alpha = 0.5) +
+  geom_line(aes(y = observed),
+            color = "white",
+            size  = 1) +
+  geom_line(aes(y = observed)) +
+  geom_point(aes(y = observed)) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(x        = "Date",
+       y        = "Cumulative Deficit Hospitilization-other",
+       title    = "Cumulative Deficit Hospitilization for other Cases in MA",
+       subtitle = "During the first wave of Covid-19")
+cumulative_deficit_plot_9
+```
+
+```{r}
+library(patchwork)
+
+x_limits <- as.Date(c("2019-01-01", "2025-01-01"))
+x_breaks <- seq(from = x_limits[1], to = x_limits[2], by = "1 year")
+
+
+combined_plot_9_adj <- combined_plot_9 +
+  theme(legend.position = "bottom",
+        legend.justification = c(1, 0),
+        legend.box.just = "right") +
+  labs(x = NULL) +
+  scale_x_date(limits = x_limits, breaks = x_breaks, date_labels = "%Y")
+
+deficit_plot_9x_adj <- deficit_plot_9x +
+  labs(x = NULL) +
+  scale_x_date(limits = x_limits, breaks = x_breaks, date_labels = "%Y")
+
+cumulative_deficit_plot_9_adj <- cumulative_deficit_plot_9 +
+  labs(x = NULL) +
+  scale_x_date(limits = x_limits, breaks = x_breaks, date_labels = "%Y")
+
+final_combined_plot_9 <- combined_plot_9_adj /
+                       deficit_plot_9x_adj /
+                       cumulative_deficit_plot_9_adj +
+  plot_layout(ncol = 1, heights = c(1, 1, 1))
+
+
+final_combined_plot_9
+
+ggsave("Other_combined_figure.png",
+       plot = final_combined_plot_5,
+       width = 11,       
+       height = 10.5,    
+       dpi = 300,
+       bg = "white")
+```
+
+
+### Different Approuch
+
+```{r}
+library(ggplot2)
+library(patchwork)
+library(cowplot)
+library(scales)
+
+# Common scale settings
+x_limits <- as.Date(c("2019-01-01", "2025-01-01"))
+x_breaks <- seq(x_limits[1], x_limits[2], by = "1 year")
+category_labels <- c("Cardiovascular", "Digestive", "Infectious", "Infectious Respiratory",
+                     "Injury", "Pneumonia", "Renal", "Respiratory", "Other")
+
+# ----- CLEANERS -----
+clean_combined <- function(plots, labels) {
+  mapply(function(p, label) {
+    p +
+      labs(title = label, x = NULL) +
+      scale_x_date(limits = x_limits, breaks = x_breaks, date_labels = "%Y") +
+      theme_minimal() +
+      theme(legend.position = "none",
+            plot.title = element_text(hjust = 0.5, size = 11),
+            axis.text.x = element_text(size = 8))
+  }, plots, labels, SIMPLIFY = FALSE)
+}
+
+clean_deficit <- function(plot_list, labels) {
+  mapply(function(p, label) {
+    p +
+      labs(title = label, x = NULL) +
+      scale_x_date(limits = x_limits, breaks = x_breaks, date_labels = "%Y") +
+      theme_minimal() +
+      theme(plot.title = element_text(hjust = 0.5, size = 11),
+            axis.text.x = element_text(size = 8))
+  }, plot_list, labels, SIMPLIFY = FALSE)
+}
+
+clean_cumulative <- function(plots, labels) {
+  mapply(function(p, label) {
+    p +
+      labs(title = label, x = NULL, y = NULL, subtitle = NULL) +
+      scale_x_date(limits = x_limits, breaks = x_breaks, date_labels = "%Y") +
+      scale_y_continuous(labels = comma) +
+      theme_minimal() +
+      theme(plot.title = element_text(hjust = 0.5, size = 11),
+            axis.text = element_text(size = 8))
+  }, plots, labels, SIMPLIFY = FALSE)
+}
+
+# ----- APPLY CLEANING -----
+combined_clean <- clean_combined(list(
+  combined_plot_1, combined_plot_2, combined_plot_3,
+  combined_plot_4, combined_plot_5, combined_plot_6,
+  combined_plot_7, combined_plot_8, combined_plot_9
+), category_labels)
+
+deficit_clean <- clean_deficit(list(
+  deficit_plot_x, deficit_plot_2x, deficit_plot_3x,
+  deficit_plot_4x, deficit_plot_5x, deficit_plot_6x,
+  deficit_plot_7x, deficit_plot_8x, deficit_plot_9x
+), category_labels)
+
+cumulative_clean <- clean_cumulative(list(
+  cumulative_deficit_plot_1, cumulative_deficit_plot_2, cumulative_deficit_plot_3,
+  cumulative_deficit_plot_4, cumulative_deficit_plot_5, cumulative_deficit_plot_6,
+  cumulative_deficit_plot_7, cumulative_deficit_plot_8, cumulative_deficit_plot_9
+), category_labels)
+
+# ----- LEGEND FOR COMBINED -----
+legend_shared <- get_legend(
+  combined_plot_1 +
+    theme(legend.position = "bottom",
+          legend.title = element_text(size = 10),
+          legend.text = element_text(size = 9))
+)
+
+# ----- FINAL COMBINED PLOT (balanced, readable) -----
+combined_final <- wrap_plots(combined_clean, ncol = 3) +
+  plot_layout(guides = "collect") &
+  theme(legend.position = "bottom")
+
+combined_final <- combined_final +
+  plot_annotation(
+    title = "Weekly Observed vs Expected Hospitalizations by Cause",
+    theme = theme(plot.title = element_text(hjust = 0.5, size = 15))
+  )
+
+ggsave("combined_all_categories.png",
+       plot = combined_final,
+       width = 12, height = 10, dpi = 300, bg = "white")
+
+
+deficit_final <- wrap_plots(deficit_clean, ncol = 3) +
+  plot_annotation(
+    title = "Deviations from Expected Weekly Admissions",
+    theme = theme(plot.title = element_text(hjust = 0.5, size = 14))
+  )
+
+ggsave("deficit_all_categories.png",
+       plot = deficit_final,
+       width = 11, height = 9.5, dpi = 300, bg = "white")
+
+
+cumulative_grid <- wrap_plots(cumulative_clean, ncol = 3)
+
+y_label <- ggdraw() +
+  draw_label("Cumulative Deficit in Hospitalizations", angle = 90, size = 12)
+
+cumulative_final <- plot_grid(
+  y_label, cumulative_grid,
+  rel_widths = c(0.04, 0.96),
+  nrow = 1
+)
+
+cumulative_final <- cumulative_final +
+  plot_annotation(
+    title = "Cumulative Deficit in Hospital Admissions by Cause (2020–2024)",
+    theme = theme(plot.title = element_text(hjust = 0.5, size = 15))
+  )
+
+ggsave("cumulative_all_categories.png",
+       plot = cumulative_final,
+       width = 12, height = 10, dpi = 300, bg = "white")
+
+combined_final
+deficit_final
+cumulative_final
+```
+
+
+```{r}
+ggsave("deficit_plot_x.png", plot = deficit_plot_x, width = 8, height = 6, dpi = 300)
+ggsave("deficit_plot_2x.png", plot = deficit_plot_2x, width = 8, height = 6, dpi = 300)
+ggsave("deficit_plot_3x.png", plot = deficit_plot_3x, width = 8, height = 6, dpi = 300)
+ggsave("deficit_plot_4x.png", plot = deficit_plot_4x, width = 8, height = 6, dpi = 300)
+ggsave("deficit_plot_5x.png", plot = deficit_plot_5x, width = 8, height = 6, dpi = 300)
+ggsave("deficit_plot_6x.png", plot = deficit_plot_6x, width = 8, height = 6, dpi = 300)
+ggsave("deficit_plot_7x.png", plot = deficit_plot_7x, width = 8, height = 6, dpi = 300)
+ggsave("deficit_plot_8x.png", plot = deficit_plot_8x, width = 8, height = 6, dpi = 300)
+ggsave("deficit_plot_9x.png", plot = deficit_plot_9x, width = 8, height = 6, dpi = 300)
+```
+
+
+### Cumulative deficit interactive plots
+
+```{r}
+cumulative_deficit <- deficit_cumulative(fit_x, 
+                                        start = make_date(2020, 03, 01),
+                                        end   = make_date(2024, 12, 28))
+
+direct_plotly <- plot_ly(data = cumulative_deficit) %>%
+  add_ribbons(x = ~date, 
+              ymin = ~observed - 2*sd, 
+              ymax = ~observed + 2*sd,
+              name = "95% CI",
+              fillcolor = "rgba(180, 180, 180, 0.5)",
+              line = list(color = "transparent"),
+              hoverinfo = "none") %>%
+
+  add_lines(x = ~date, 
+            y = ~observed,
+            name = "Observed",
+            line = list(color = "black", width = 2),
+            hoverinfo = "text",
+            text = ~paste("Date:", date, 
+                         "<br>Cumulative Deficit:", round(observed, 1),
+                         "<br>Lower CI:", round(observed - 2*sd, 1),
+                         "<br>Upper CI:", round(observed + 2*sd, 1))) %>%
+
+  add_markers(x = ~date, 
+              y = ~observed,
+              name = "Data Points",
+              marker = list(color = "black", size = 4),
+              hoverinfo = "text",
+              text = ~paste("Date:", date, 
+                           "<br>Cumulative Deficit:", round(observed, 1),
+                           "<br>Lower CI:", round(observed - 2*sd, 1),
+                           "<br>Upper CI:", round(observed + 2*sd, 1))) %>%
+  layout(title = list(text = "Cumulative Deficit Hospitalization for Cardio Cases in MA<br><sup>During the first wave of Covid-19</sup>"),
+         xaxis = list(title = "Date"),
+         yaxis = list(title = "Cumulative Deficit Hospitalization-Cardio", 
+                     tickformat = ","),
+         hoverlabel = list(bgcolor = "white", 
+                          font = list(family = "Arial", size = 12)),
+         hovermode = "closest")
+
+direct_plotly
+```
+
+```{r}
+# -- Computing excess Hospitilization counts in Massachusetts from March 1, 2020 to May 9, 2020
+cumulative_deficit  <- deficit_cumulative(fit_2x, 
+                                        start = make_date(2020, 03, 01),
+                                        end   = make_date(2024, 12, 28))
+
+# -- Visualizing cumulative excess deaths in MA
+cumulative_deficit_plot_2 <- cumulative_deficit %>%
+  ggplot(aes(date)) +
+  geom_ribbon(aes(ymin = observed- 2*sd, ymax = observed + 2*sd), alpha = 0.5) +
+  geom_line(aes(y = observed),
+            color = "white",
+            size  = 1) +
+  geom_line(aes(y = observed)) +
+  geom_point(aes(y = observed)) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(x        = "Date",
+       y        = "Cumulative Deficit Hospitilization-Digestive",
+       title    = "Cumulative Deficit Hospitilization for Digestive Cases in MA",
+       subtitle = "During the first wave of Covid-19")
+cumulative_deficit_plot_2
+```
+
+```{r}
+cumulative_deficit <- deficit_cumulative(fit_2x, 
+                                        start = make_date(2020, 03, 01),
+                                        end   = make_date(2024, 12, 28))
+
+direct_plotly <- plot_ly(data = cumulative_deficit) %>%
+  add_ribbons(x = ~date, 
+              ymin = ~observed - 2*sd, 
+              ymax = ~observed + 2*sd,
+              name = "95% CI",
+              fillcolor = "rgba(180, 180, 180, 0.5)",
+              line = list(color = "transparent"),
+              hoverinfo = "none") %>%
+
+  add_lines(x = ~date, 
+            y = ~observed,
+            name = "Observed",
+            line = list(color = "black", width = 2),
+            hoverinfo = "text",
+            text = ~paste("Date:", date, 
+                         "<br>Cumulative Deficit:", round(observed, 1),
+                         "<br>Lower CI:", round(observed - 2*sd, 1),
+                         "<br>Upper CI:", round(observed + 2*sd, 1))) %>%
+
+  add_markers(x = ~date, 
+              y = ~observed,
+              name = "Data Points",
+              marker = list(color = "black", size = 4),
+              hoverinfo = "text",
+              text = ~paste("Date:", date, 
+                           "<br>Cumulative Deficit:", round(observed, 1),
+                           "<br>Lower CI:", round(observed - 2*sd, 1),
+                           "<br>Upper CI:", round(observed + 2*sd, 1))) %>%
+  layout(title = list(text = "Cumulative Deficit Hospitalization for Digestive Cases in MA<br><sup>During the first wave of Covid-19</sup>"),
+         xaxis = list(title = "Date"),
+         yaxis = list(title = "Cumulative Deficit Hospitalization-Digestive", 
+                     tickformat = ","),
+         hoverlabel = list(bgcolor = "white", 
+                          font = list(family = "Arial", size = 12)),
+         hovermode = "closest")
+
+direct_plotly
+```
+
+#3
+
+```{r}
+cumulative_deficit <- deficit_cumulative(fit_3x, 
+                                        start = make_date(2020, 03, 01),
+                                        end   = make_date(2024, 12, 28))
+
+direct_plotly <- plot_ly(data = cumulative_deficit) %>%
+  add_ribbons(x = ~date, 
+              ymin = ~observed - 2*sd, 
+              ymax = ~observed + 2*sd,
+              name = "95% CI",
+              fillcolor = "rgba(180, 180, 180, 0.5)",
+              line = list(color = "transparent"),
+              hoverinfo = "none") %>%
+
+  add_lines(x = ~date, 
+            y = ~observed,
+            name = "Observed",
+            line = list(color = "black", width = 2),
+            hoverinfo = "text",
+            text = ~paste("Date:", date, 
+                         "<br>Cumulative Deficit:", round(observed, 1),
+                         "<br>Lower CI:", round(observed - 2*sd, 1),
+                         "<br>Upper CI:", round(observed + 2*sd, 1))) %>%
+
+  add_markers(x = ~date, 
+              y = ~observed,
+              name = "Data Points",
+              marker = list(color = "black", size = 4),
+              hoverinfo = "text",
+              text = ~paste("Date:", date, 
+                           "<br>Cumulative Deficit:", round(observed, 1),
+                           "<br>Lower CI:", round(observed - 2*sd, 1),
+                           "<br>Upper CI:", round(observed + 2*sd, 1))) %>%
+  layout(title = list(text = "Cumulative Deficit Hospitalization for Infectious Cases in MA<br><sup>During the first wave of Covid-19</sup>"),
+         xaxis = list(title = "Date"),
+         yaxis = list(title = "Cumulative Deficit Hospitalization-Infectious", 
+                     tickformat = ","),
+         hoverlabel = list(bgcolor = "white", 
+                          font = list(family = "Arial", size = 12)),
+         hovermode = "closest")
+
+direct_plotly
+```
+
+#4
+
+
+```{r}
+cumulative_deficit <- deficit_cumulative(fit_4x, 
+                                        start = make_date(2020, 03, 01),
+                                        end   = make_date(2024, 12, 28))
+
+direct_plotly <- plot_ly(data = cumulative_deficit) %>%
+  add_ribbons(x = ~date, 
+              ymin = ~observed - 2*sd, 
+              ymax = ~observed + 2*sd,
+              name = "95% CI",
+              fillcolor = "rgba(180, 180, 180, 0.5)",
+              line = list(color = "transparent"),
+              hoverinfo = "none") %>%
+
+  add_lines(x = ~date, 
+            y = ~observed,
+            name = "Observed",
+            line = list(color = "black", width = 2),
+            hoverinfo = "text",
+            text = ~paste("Date:", date, 
+                         "<br>Cumulative Deficit:", round(observed, 1),
+                         "<br>Lower CI:", round(observed - 2*sd, 1),
+                         "<br>Upper CI:", round(observed + 2*sd, 1))) %>%
+
+  add_markers(x = ~date, 
+              y = ~observed,
+              name = "Data Points",
+              marker = list(color = "black", size = 4),
+              hoverinfo = "text",
+              text = ~paste("Date:", date, 
+                           "<br>Cumulative Deficit:", round(observed, 1),
+                           "<br>Lower CI:", round(observed - 2*sd, 1),
+                           "<br>Upper CI:", round(observed + 2*sd, 1))) %>%
+  layout(title = list(text = "Cumulative Deficit Hospitalization for infectious respiratory Cases in MA<br><sup>During the first wave of Covid-19</sup>"),
+         xaxis = list(title = "Date"),
+         yaxis = list(title = "Cumulative Deficit Hospitalization-infectious respiratory", 
+                     tickformat = ","),
+         hoverlabel = list(bgcolor = "white", 
+                          font = list(family = "Arial", size = 12)),
+         hovermode = "closest")
+
+direct_plotly
+```
+
+#5
+
+
+```{r}
+cumulative_deficit <- deficit_cumulative(fit_5x, 
+                                        start = make_date(2020, 03, 01),
+                                        end   = make_date(2024, 12, 28))
+
+direct_plotly <- plot_ly(data = cumulative_deficit) %>%
+  add_ribbons(x = ~date, 
+              ymin = ~observed - 2*sd, 
+              ymax = ~observed + 2*sd,
+              name = "95% CI",
+              fillcolor = "rgba(180, 180, 180, 0.5)",
+              line = list(color = "transparent"),
+              hoverinfo = "none") %>%
+
+  add_lines(x = ~date, 
+            y = ~observed,
+            name = "Observed",
+            line = list(color = "black", width = 2),
+            hoverinfo = "text",
+            text = ~paste("Date:", date, 
+                         "<br>Cumulative Deficit:", round(observed, 1),
+                         "<br>Lower CI:", round(observed - 2*sd, 1),
+                         "<br>Upper CI:", round(observed + 2*sd, 1))) %>%
+
+  add_markers(x = ~date, 
+              y = ~observed,
+              name = "Data Points",
+              marker = list(color = "black", size = 4),
+              hoverinfo = "text",
+              text = ~paste("Date:", date, 
+                           "<br>Cumulative Deficit:", round(observed, 1),
+                           "<br>Lower CI:", round(observed - 2*sd, 1),
+                           "<br>Upper CI:", round(observed + 2*sd, 1))) %>%
+  layout(title = list(text = "Cumulative Deficit Hospitalization for injury Cases in MA<br><sup>During the first wave of Covid-19</sup>"),
+         xaxis = list(title = "Date"),
+         yaxis = list(title = "Cumulative Deficit Hospitalization-injury", 
+                     tickformat = ","),
+         hoverlabel = list(bgcolor = "white", 
+                          font = list(family = "Arial", size = 12)),
+         hovermode = "closest")
+
+direct_plotly
+```
+
+#6
+
+```{r}
+cumulative_deficit <- deficit_cumulative(fit_6x, 
+                                        start = make_date(2020, 03, 01),
+                                        end   = make_date(2024, 12, 28))
+
+direct_plotly <- plot_ly(data = cumulative_deficit) %>%
+  add_ribbons(x = ~date, 
+              ymin = ~observed - 2*sd, 
+              ymax = ~observed + 2*sd,
+              name = "95% CI",
+              fillcolor = "rgba(180, 180, 180, 0.5)",
+              line = list(color = "transparent"),
+              hoverinfo = "none") %>%
+
+  add_lines(x = ~date, 
+            y = ~observed,
+            name = "Observed",
+            line = list(color = "black", width = 2),
+            hoverinfo = "text",
+            text = ~paste("Date:", date, 
+                         "<br>Cumulative Deficit:", round(observed, 1),
+                         "<br>Lower CI:", round(observed - 2*sd, 1),
+                         "<br>Upper CI:", round(observed + 2*sd, 1))) %>%
+
+  add_markers(x = ~date, 
+              y = ~observed,
+              name = "Data Points",
+              marker = list(color = "black", size = 4),
+              hoverinfo = "text",
+              text = ~paste("Date:", date, 
+                           "<br>Cumulative Deficit:", round(observed, 1),
+                           "<br>Lower CI:", round(observed - 2*sd, 1),
+                           "<br>Upper CI:", round(observed + 2*sd, 1))) %>%
+  layout(title = list(text = "Cumulative Deficit Hospitalization for pneumonia Cases in MA<br><sup>During the first wave of Covid-19</sup>"),
+         xaxis = list(title = "Date"),
+         yaxis = list(title = "Cumulative Deficit Hospitalization-pneumonia", 
+                     tickformat = ","),
+         hoverlabel = list(bgcolor = "white", 
+                          font = list(family = "Arial", size = 12)),
+         hovermode = "closest")
+
+direct_plotly
+```
+
+#7
+
+
+```{r}
+cumulative_deficit <- deficit_cumulative(fit_7x, 
+                                        start = make_date(2020, 03, 01),
+                                        end   = make_date(2024, 12, 28))
+
+direct_plotly <- plot_ly(data = cumulative_deficit) %>%
+  add_ribbons(x = ~date, 
+              ymin = ~observed - 2*sd, 
+              ymax = ~observed + 2*sd,
+              name = "95% CI",
+              fillcolor = "rgba(180, 180, 180, 0.5)",
+              line = list(color = "transparent"),
+              hoverinfo = "none") %>%
+
+  add_lines(x = ~date, 
+            y = ~observed,
+            name = "Observed",
+            line = list(color = "black", width = 2),
+            hoverinfo = "text",
+            text = ~paste("Date:", date, 
+                         "<br>Cumulative Deficit:", round(observed, 1),
+                         "<br>Lower CI:", round(observed - 2*sd, 1),
+                         "<br>Upper CI:", round(observed + 2*sd, 1))) %>%
+
+  add_markers(x = ~date, 
+              y = ~observed,
+              name = "Data Points",
+              marker = list(color = "black", size = 4),
+              hoverinfo = "text",
+              text = ~paste("Date:", date, 
+                           "<br>Cumulative Deficit:", round(observed, 1),
+                           "<br>Lower CI:", round(observed - 2*sd, 1),
+                           "<br>Upper CI:", round(observed + 2*sd, 1))) %>%
+  layout(title = list(text = "Cumulative Deficit Hospitalization for renal Cases in MA<br><sup>During the first wave of Covid-19</sup>"),
+         xaxis = list(title = "Date"),
+         yaxis = list(title = "Cumulative Deficit Hospitalization-renal", 
+                     tickformat = ","),
+         hoverlabel = list(bgcolor = "white", 
+                          font = list(family = "Arial", size = 12)),
+         hovermode = "closest")
+
+direct_plotly
+```
+
+#8
+
+```{r}
+cumulative_deficit <- deficit_cumulative(fit_8x, 
+                                        start = make_date(2020, 03, 01),
+                                        end   = make_date(2024, 12, 28))
+
+direct_plotly <- plot_ly(data = cumulative_deficit) %>%
+  add_ribbons(x = ~date, 
+              ymin = ~observed - 2*sd, 
+              ymax = ~observed + 2*sd,
+              name = "95% CI",
+              fillcolor = "rgba(180, 180, 180, 0.5)",
+              line = list(color = "transparent"),
+              hoverinfo = "none") %>%
+
+  add_lines(x = ~date, 
+            y = ~observed,
+            name = "Observed",
+            line = list(color = "black", width = 2),
+            hoverinfo = "text",
+            text = ~paste("Date:", date, 
+                         "<br>Cumulative Deficit:", round(observed, 1),
+                         "<br>Lower CI:", round(observed - 2*sd, 1),
+                         "<br>Upper CI:", round(observed + 2*sd, 1))) %>%
+
+  add_markers(x = ~date, 
+              y = ~observed,
+              name = "Data Points",
+              marker = list(color = "black", size = 4),
+              hoverinfo = "text",
+              text = ~paste("Date:", date, 
+                           "<br>Cumulative Deficit:", round(observed, 1),
+                           "<br>Lower CI:", round(observed - 2*sd, 1),
+                           "<br>Upper CI:", round(observed + 2*sd, 1))) %>%
+  layout(title = list(text = "Cumulative Deficit Hospitalization for respiratory Cases in MA<br><sup>During the first wave of Covid-19</sup>"),
+         xaxis = list(title = "Date"),
+         yaxis = list(title = "Cumulative Deficit Hospitalization-respiratory", 
+                     tickformat = ","),
+         hoverlabel = list(bgcolor = "white", 
+                          font = list(family = "Arial", size = 12)),
+         hovermode = "closest")
+
+direct_plotly
+```
+
+#9
+
+```{r}
+cumulative_deficit <- deficit_cumulative(fit_9x, 
+                                        start = make_date(2020, 03, 01),
+                                        end   = make_date(2024, 12, 28))
+
+direct_plotly <- plot_ly(data = cumulative_deficit) %>%
+  add_ribbons(x = ~date, 
+              ymin = ~observed - 2*sd, 
+              ymax = ~observed + 2*sd,
+              name = "95% CI",
+              fillcolor = "rgba(180, 180, 180, 0.5)",
+              line = list(color = "transparent"),
+              hoverinfo = "none") %>%
+
+  add_lines(x = ~date, 
+            y = ~observed,
+            name = "Observed",
+            line = list(color = "black", width = 2),
+            hoverinfo = "text",
+            text = ~paste("Date:", date, 
+                         "<br>Cumulative Deficit:", round(observed, 1),
+                         "<br>Lower CI:", round(observed - 2*sd, 1),
+                         "<br>Upper CI:", round(observed + 2*sd, 1))) %>%
+
+  add_markers(x = ~date, 
+              y = ~observed,
+              name = "Data Points",
+              marker = list(color = "black", size = 4),
+              hoverinfo = "text",
+              text = ~paste("Date:", date, 
+                           "<br>Cumulative Deficit:", round(observed, 1),
+                           "<br>Lower CI:", round(observed - 2*sd, 1),
+                           "<br>Upper CI:", round(observed + 2*sd, 1))) %>%
+  layout(title = list(text = "Cumulative Deficit Hospitalization for other Cases in MA<br><sup>During the first wave of Covid-19</sup>"),
+         xaxis = list(title = "Date"),
+         yaxis = list(title = "Cumulative Deficit Hospitalization-other", 
+                     tickformat = ","),
+         hoverlabel = list(bgcolor = "white", 
+                          font = list(family = "Arial", size = 12)),
+         hovermode = "closest")
+
+direct_plotly
+```
+
+
+```{r}
+ggsave("cumulative_deficit_plot_1.png", plot = cumulative_deficit_plot_1, width = 8, height = 6, dpi = 300)
+ggsave("cumulative_deficit_plot_2.png", plot = cumulative_deficit_plot_2, width = 8, height = 6, dpi = 300)
+ggsave("cumulative_deficit_plot_3.png", plot = cumulative_deficit_plot_3, width = 8, height = 6, dpi = 300)
+ggsave("cumulative_deficit_plot_4.png", plot = cumulative_deficit_plot_4, width = 8, height = 6, dpi = 300)
+ggsave("cumulative_deficit_plot_5.png", plot = cumulative_deficit_plot_5, width = 8, height = 6, dpi = 300)
+ggsave("cumulative_deficit_plot_6.png", plot = cumulative_deficit_plot_6, width = 8, height = 6, dpi = 300)
+ggsave("cumulative_deficit_plot_7.png", plot = cumulative_deficit_plot_7, width = 8, height = 6, dpi = 300)
+ggsave("cumulative_deficit_plot_8.png", plot = cumulative_deficit_plot_8, width = 8, height = 6, dpi = 300)
+ggsave("cumulative_deficit_plot_9.png", plot = cumulative_deficit_plot_9, width = 8, height = 6, dpi = 300)
+```
+
+
+
+```{r}
+ggsave("cumulative_deficit_plot_1.png", plot = cumulative_deficit_plot_1, width = 5, height = 3, dpi = 300)
+ggsave("cumulative_deficit_plot_2.png", plot = cumulative_deficit_plot_2, width = 5, height = 3, dpi = 300)
+ggsave("cumulative_deficit_plot_3.png", plot = cumulative_deficit_plot_3, width = 5, height = 3, dpi = 300)
+
+ggsave("cumulative_deficit_plot_4.png", plot = cumulative_deficit_plot_4, width = 5, height = 3, dpi = 300)
+ggsave("cumulative_deficit_plot_5.png", plot = cumulative_deficit_plot_5, width = 5, height = 3, dpi = 300)
+ggsave("cumulative_deficit_plot_6.png", plot = cumulative_deficit_plot_6, width = 5, height = 3, dpi = 300)
+
+ggsave("cumulative_deficit_plot_7.png", plot = cumulative_deficit_plot_7, width = 5, height = 3, dpi = 300)
+ggsave("cumulative_deficit_plot_8.png", plot = cumulative_deficit_plot_8, width = 5, height = 3, dpi = 300)
+ggsave("cumulative_deficit_plot_9.png", plot = cumulative_deficit_plot_9, width = 5, height = 3, dpi = 300)
+```
+
+
+```{r}
+# new 'category' column added
+cardiovascular <- fit_x$detected_intervals %>%
+  mutate(category = "cardiovascular")
+digestive <- fit_2x$detected_intervals %>%
+  mutate(category = "digestive")
+infectious <- fit_3x$detected_intervals %>%
+  mutate(category = "infectious")
+infectious_respiratory <- fit_4x$detected_intervals %>%
+  mutate(category = "infectious respiratory")
+injury <- fit_5x$detected_intervals %>%
+  mutate(category = "injury")
+pneumonia <- fit_6x$detected_intervals %>%
+  mutate(category = "pneumonia")
+renal <- fit_7x$detected_intervals %>%
+  mutate(category = "renal")
+respiratory <- fit_8x$detected_intervals %>%
+  mutate(category = "respiratory")
+other <- fit_9x$detected_intervals %>%
+  mutate(category = "other")
+
+combined_intervals <- bind_rows(
+  cardiovascular,
+  digestive,
+  infectious,
+  infectious_respiratory,
+  injury,
+  pneumonia,
+  renal,
+  respiratory,
+  other
+)
+
+combined_intervals <- combined_intervals %>%
+  select(category, everything())
+
+combined_intervals <- combined_intervals %>%
+  mutate(across(c(where(is.numeric)), ~round(., 1)))
+
+kable_table <- combined_intervals %>%
+  kable(
+    format = "html",
+    caption = "Detected Intervals by Disease Category",
+    align = c("l", rep("c", 9)),
+    col.names = c(
+      "Category", "Start Date", "End Date", "Observed Count Rate", 
+      "Expected Count Rate", "SD Count Rate", "Observed Counts", 
+      "Expected Counts", "Deficit", "SD"
+    ),
+    row.names = FALSE
+  )
+
+kable_table
+```
+
+```{r}
+library(kableExtra)
+library(webshot2)
+
+# Create styled HTML table
+html_table <- combined_intervals %>%
+  kable("html",
+        escape = FALSE,
+        caption = "Detected Intervals by Disease Category",
+        align = c("l", rep("c", ncol(combined_intervals) - 1)),
+        col.names = c(
+          "Category", "Start Date", "End Date", "Observed Count Rate", 
+          "Expected Count Rate", "SD Count Rate", "Observed Counts", 
+          "Expected Counts", "Deficit", "SD"
+        )) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                full_width = FALSE,
+                position = "center")
+
+# Save as HTML and then convert to PNG
+save_kable(html_table, "combined_intervals_table.html")
+webshot("combined_intervals_table.html", "combined_intervals_table.png", vwidth = 1200, vheight = 800)
+```
+
+
+
