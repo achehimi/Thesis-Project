@@ -29,6 +29,12 @@ library(plotly)
 library(patchwork)
 library(scales)
 library(cowplot)
+library(broom)
+library(gt)
+library(webshot2)
+library(stringr)
+library(purrr)
+library(kableExtra)
 ```
 
 ```{r}
@@ -81,6 +87,42 @@ colSums(is.na(allcause_state_byweek))
 
 #### Deficit Function Used
 
+
+```{r}
+deficit_plot <- function(fit, 
+                        title     = "", 
+                        ylim      = NULL,
+                        show.data = TRUE,
+                        alpha     = 0.05){
+
+  requireNamespace("ggplot2")
+
+  z <- qnorm(1 - alpha/2)
+
+
+  p <- with(fit, data.frame(date = date,
+                        y        = (observed - expected)/expected,
+                        increase = fitted,
+                        sd       = sd,
+                        se       = se)) %>%
+    ggplot(aes(date, y)) +
+    geom_ribbon(aes(ymin = increase - z * se, ymax = increase + z * se), alpha = 0.5, fill = "#3366FF") + #needs to be edited
+    geom_hline(yintercept = 0) +
+    ylab("% Change from expected count") +
+    scale_y_continuous(labels = scales::percent) +
+    scale_x_date(date_labels = "%b %Y") +
+    ggtitle(title) +
+    xlab("Date") 
+
+  if(show.data) p <- p + geom_point(alpha = 0.3)
+
+  if(!is.null(ylim)) p <- p + coord_cartesian(ylim = ylim)
+
+  return(p + geom_line(aes(y = increase), size=0.70, col="#3366FF"))
+}
+```
+
+
 ```{r}
 deficit_cumulative <- function(fit, start, end){
   if (!"curve_fit" %in% attr(fit, "type"))
@@ -127,7 +169,7 @@ cardio <- all_cause_state_by_week %>%
     filter(!(MMWRyear == 2019 & MMWRweek == 1 | MMWRyear == 2025 & MMWRweek == 1)) %>%
   mutate(population = 7001399, # given from https://www.census.gov/quickfacts/fact/table/MA/PST045223
          outcome = statecount_numeric)
-
+3
 # deficit model with COVID-19 dates excluded
 cardio_deficit <- compute_expected(cardio, 
                                exclude = exclude_dates,
@@ -145,12 +187,31 @@ combined_plot_1 <- ggplot(cardio_deficit, aes(x = date)) +
                      labels = c("Included in Model", "Excluded from Model")) +
   labs(title = "Weekly Cardiovascular Hospitalizations in MA",
        x = "Date",
-       y = "Outcome",
+       y = "Weekly Hospitilizations",
        color = "Data Point Status") +
   theme_minimal()
 
 combined_plot_1
+ggsave("combined_plot_1.png", plot = combined_plot_1, width = 8, height = 6, dpi = 300)
 ```
+
+```{r}
+simple_points_plot <- ggplot(cardio, aes(x = date, y = outcome)) +
+  geom_point(size = 2) +
+  geom_vline(xintercept = as.Date("2020-03-01"), color = "red", linetype = "dashed", size = 1) +
+  labs(
+    title = "Weekly Cardiovascular Hospitalizations in MA",
+    x = "Date",
+    y = "Weekly Hospitalizations"
+  ) +
+  theme_minimal()
+
+simple_points_plot
+
+ggsave("simple_points_plot.png", plot = simple_points_plot, width = 8, height = 6, dpi = 300)
+```
+
+
 
 
 ```{r}
@@ -162,7 +223,7 @@ fit_x <- cardio_deficit %>%
                verbose = FALSE)
 
 # -- Visualizing deviations from expected hospitalization in Massachusetts
-deficit_plot_x <- excess_plot(fit_x, 
+deficit_plot_x <- deficit_plot(fit_x, 
             title = "Deviations from Expected Counts for Cardio in MA"
 )
 deficit_plot_x
@@ -275,7 +336,7 @@ combined_plot_2 <- ggplot(digestive_deficit, aes(x = date)) +
                      labels = c("Included in Model", "Excluded from Model")) +
   labs(title = "Weekly digestive ED Hospitilizations in MA",
        x = "Date",
-       y = "Outcome",
+       y = "Weekly Hospitilizations",
        color = "Data Point Status") +
   theme_minimal()
 
@@ -292,7 +353,7 @@ fit_2x <- digestive_deficit %>%
                verbose = FALSE)
 
 # -- Visualizing deviations from expected hospitalization in Massachusetts
-deficit_plot_2x <- excess_plot(fit_2x, 
+deficit_plot_2x <- deficit_plot(fit_2x, 
             title = "Deviations from Expected Counts for Digestive in MA"
 )
 deficit_plot_2x
@@ -391,7 +452,7 @@ combined_plot_3 <- ggplot(infectious_deficit, aes(x = date)) +
                      labels = c("Included in Model", "Excluded from Model")) +
   labs(title = "Weekly Infectious ED Hospitilizations in MA",
        x = "Date",
-       y = "Outcome",
+       y = "Weekly Hospitilizations",
        color = "Data Point Status") +
   theme_minimal()
 combined_plot_3
@@ -401,12 +462,12 @@ combined_plot_3
 ```{r}
 fit_3x <- infectious_deficit %>% 
   deficit_model(exclude = exclude_dates,
-               start = as.Date("2020-03-01"),
-               end = as.Date("2024-12-31"),
+               start = min(.$date),
+               end = max(.$date),
                knots.per.year = 12,
                verbose = FALSE)
 
-deficit_plot_3x <- excess_plot(fit_3x, 
+deficit_plot_3x <- deficit_plot(fit_3x, 
             title = "Deviations from Expected Counts for Infectious in MA"
 )
 deficit_plot_3x
@@ -468,7 +529,7 @@ final_combined_plot_3 <- combined_plot_3_adj /
 final_combined_plot_3
 
 ggsave("Infectious_combined_figure.png",
-       plot = final_combined_plot_2,
+       plot = final_combined_plot_3,
        width = 11,       
        height = 10.5,    
        dpi = 300,
@@ -506,7 +567,7 @@ combined_plot_4 <- ggplot(infectious_respiratory_deficit, aes(x = date)) +
                      labels = c("Included in Model", "Excluded from Model")) +
   labs(title = "Weekly Infectious Respiratory ED Hospitilizations in MA",
        x = "Date",
-       y = "Outcome",
+       y = "Weekly Hospitilizations",
        color = "Data Point Status") +
   theme_minimal()
 combined_plot_4
@@ -518,13 +579,13 @@ combined_plot_4
 # -- Fitting excess model
 fit_4x <- infectious_respiratory_deficit %>% 
   deficit_model(exclude = exclude_dates,
-               start = as.Date("2020-03-01"),
-               end = as.Date("2025-12-31"),
+                start = min(.$date),
+               end = max(.$date),
                knots.per.year = 12,
                verbose = FALSE)
 
 # -- Visualizing deviations from expected hospitalization in Massachusetts
-deficit_plot_4x <- excess_plot(fit_4x, 
+deficit_plot_4x <- deficit_plot(fit_4x, 
             title = "Deviations from Expected Counts for Infectious Respiratory in MA"
 )
 deficit_plot_4x
@@ -539,7 +600,6 @@ cumulative_deficit  <- deficit_cumulative(fit_4x,
                                         start = make_date(2020, 03, 01),
                                         end   = make_date(2024, 12, 28))
 
-# -- Visualizing cumulative excess deaths in MA
 cumulative_deficit_plot_4 <- cumulative_deficit %>%
   ggplot(aes(date)) +
   geom_ribbon(aes(ymin = observed- 2*sd, ymax = observed + 2*sd), alpha = 0.5) +
@@ -627,7 +687,7 @@ combined_plot_5 <- ggplot(injury_deficit, aes(x = date)) +
                      labels = c("Included in Model", "Excluded from Model")) +
   labs(title = "Weekly Injury ED Hospitilizations in MA",
        x = "Date",
-       y = "Outcome",
+       y = "Weekly Hospitilizations",
        color = "Data Point Status") +
   theme_minimal()
 combined_plot_5
@@ -637,8 +697,8 @@ combined_plot_5
 # -- Fitting excess model
 fit_5x <- injury_deficit %>%                                                     
   deficit_model(exclude = exclude_dates,
-               start = as.Date("2020-03-01"),
-               end = as.Date("2024-12-31"),
+                start = min(.$date),
+               end = max(.$date),
                knots.per.year = 12,
                verbose = FALSE)
 
@@ -746,7 +806,7 @@ combined_plot_6 <- ggplot(pneumonia_deficit, aes(x = date)) +
                      labels = c("Included in Model", "Excluded from Model")) +
   labs(title = "Weekly Pneumonia ED Hospitilizations in MA",
        x = "Date",
-       y = "Outcome",
+       y = "Weekly Hospitilizations",
        color = "Data Point Status") +
   theme_minimal()
 combined_plot_6
@@ -757,13 +817,13 @@ combined_plot_6
 # -- Fitting excess model
 fit_6x <- pneumonia_deficit %>% 
   deficit_model(exclude = exclude_dates,
-               start = as.Date("2020-03-01"),
-               end = as.Date("2024-12-31"),
+               start = min(.$date),
+               end = max(.$date),
                knots.per.year = 12,
                verbose = FALSE)
 
 # -- Visualizing deviations from expected hospitalization in Massachusetts
-deficit_plot_6x <- excess_plot(fit_6x, 
+deficit_plot_6x <- deficit_plot(fit_6x, 
             title = "Deviations from Expected Counts for Pneumonia in MA"
 )
 deficit_plot_6x
@@ -863,7 +923,7 @@ combined_plot_7 <- ggplot(renal_deficit, aes(x = date)) +
                      labels = c("Included in Model", "Excluded from Model")) +
   labs(title = "Weekly Renal ED Hospitilizations in MA",
        x = "Date",
-       y = "Outcome",
+       y = "Weekly Hospitilizations",
        color = "Data Point Status") +
   theme_minimal()
 combined_plot_7
@@ -875,13 +935,13 @@ combined_plot_7
 # -- Fitting excess model
 fit_7x <- renal_deficit %>% 
   deficit_model(exclude = exclude_dates,
-               start = as.Date("2020-03-01"),
-               end = as.Date("2024-12-31"),
+                start = min(.$date),
+               end = max(.$date),
                knots.per.year = 12,
                verbose = FALSE)
 
 # -- Visualizing deviations from expected hospitalization in Massachusetts
-deficit_plot_7x <- excess_plot(fit_7x, 
+deficit_plot_7x <- deficit_plot(fit_7x, 
             title = "Deviations from Expected Counts for Renal in MA"
 )
 deficit_plot_7x
@@ -981,7 +1041,7 @@ combined_plot_8 <- ggplot(respiratory_deficit, aes(x = date)) +
                      labels = c("Included in Model", "Excluded from Model")) +
   labs(title = "Weekly Respiratory ED Hospitilizations in MA",
        x = "Date",
-       y = "Outcome",
+       y = "Weekly Hospitilizations",
        color = "Data Point Status") +
   theme_minimal()
 combined_plot_8
@@ -992,13 +1052,13 @@ combined_plot_8
 # -- Fitting excess model
 fit_8x <- respiratory_deficit %>% 
   deficit_model(exclude = exclude_dates,
-               start = as.Date("2020-03-01"),
-               end = as.Date("2024-12-31"),
+               start = min(.$date),
+               end = max(.$date),
                knots.per.year = 12,
                verbose = FALSE)
 
 # -- Visualizing deviations from expected hospitalization in Massachusetts
-deficit_plot_8x <- excess_plot(fit_8x, 
+deficit_plot_8x <- deficit_plot(fit_8x, 
             title = "Deviations from Expected Counts for Respiratory in MA"
 )
 deficit_plot_8x
@@ -1099,7 +1159,7 @@ combined_plot_9 <- ggplot(other_deficit, aes(x = date)) +
                      labels = c("Included in Model", "Excluded from Model")) +
   labs(title = "Weekly Other ED Hospitilizations in MA",
        x = "Date",
-       y = "Outcome",
+       y = "Weekly Hospitilizations",
        color = "Data Point Status") +
   theme_minimal()
 combined_plot_9
@@ -1110,13 +1170,13 @@ combined_plot_9
 # -- Fitting excess model
 fit_9x <-  other_deficit %>% 
   deficit_model(exclude = exclude_dates,
-               start = as.Date("2020-03-01"),
-               end = as.Date("2024-12-31"),
+                start = min(.$date),
+               end = max(.$date),
                knots.per.year = 12,
                verbose = FALSE)
 
 # -- Visualizing deviations from expected hospitalization in Massachusetts
-deficit_plot_9x <- excess_plot(fit_9x, 
+deficit_plot_9x <- deficit_plot(fit_9x, 
             title = "Deviations from Expected Counts for Other in MA"
 )
 deficit_plot_9x
@@ -1178,7 +1238,7 @@ final_combined_plot_9 <- combined_plot_9_adj /
 final_combined_plot_9
 
 ggsave("Other_combined_figure.png",
-       plot = final_combined_plot_5,
+       plot = final_combined_plot_9,
        width = 11,       
        height = 10.5,    
        dpi = 300,
@@ -1855,9 +1915,6 @@ kable_table
 
 ```{r}
 library(kableExtra)
-library(webshot2)
-
-# Create styled HTML table
 html_table <- combined_intervals %>%
   kable("html",
         escape = FALSE,
@@ -1868,14 +1925,301 @@ html_table <- combined_intervals %>%
           "Expected Count Rate", "SD Count Rate", "Observed Counts", 
           "Expected Counts", "Deficit", "SD"
         )) %>%
-  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+  kableExtra::kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
                 full_width = FALSE,
                 position = "center")
 
-# Save as HTML and then convert to PNG
+html_table
 save_kable(html_table, "combined_intervals_table.html")
 webshot("combined_intervals_table.html", "combined_intervals_table.png", vwidth = 1200, vheight = 800)
 ```
+
+
+```{r}
+combined_intervals <- combined_intervals %>%
+  mutate(across(where(is.numeric), ~ round(., 1)))
+
+table_1 <- combined_intervals %>%
+  slice(1:5) %>%
+  kbl(
+    format = "html",
+    caption = "Detected Intervals by Category (1 of 2)",
+    align = c("l", rep("c", 9)),
+    col.names = c(
+      "Category", "Start Date", "End Date", "Observed Count Rate", 
+      "Expected Count Rate", "SD Count Rate", "Observed Counts", 
+      "Expected Counts", "Deficit", "SD"
+    )
+  ) %>%
+  kable_styling(full_width = FALSE)
+save_kable(table_1, file = "detected_intervals_1.png", zoom = 3)
+
+table_2 <- combined_intervals %>%
+  slice(6:9) %>%
+  kbl(
+    format = "html",
+    caption = "Detected Intervals by Category (2 of 2)",
+    align = c("l", rep("c", 9)),
+    col.names = c(
+      "Category", "Start Date", "End Date", "Observed Count Rate", 
+      "Expected Count Rate", "SD Count Rate", "Observed Counts", 
+      "Expected Counts", "Deficit", "SD"
+    )
+  ) %>%
+  kable_styling(full_width = FALSE)
+save_kable(table_2, file = "detected_intervals_2.png", zoom = 3)
+table_2 
+```
+
+
+
+### Further Analysis
+
+```{r}
+library(ggplot2)
+library(scales)
+
+total_deficits <- data.frame(
+  category = c("Cardiovascular", "Digestive", "Infectious", "Infectious Respiratory",
+               "Injury", "Pneumonia", "Renal", "Respiratory", "Other"),
+  total_deficit = c(
+    sum(cumulative_deficit_plot_1$data$observed, na.rm = TRUE),
+    sum(cumulative_deficit_plot_2$data$observed, na.rm = TRUE),
+    sum(cumulative_deficit_plot_3$data$observed, na.rm = TRUE),
+    sum(cumulative_deficit_plot_4$data$observed, na.rm = TRUE),
+    sum(cumulative_deficit_plot_5$data$observed, na.rm = TRUE),
+    sum(cumulative_deficit_plot_6$data$observed, na.rm = TRUE),
+    sum(cumulative_deficit_plot_7$data$observed, na.rm = TRUE),
+    sum(cumulative_deficit_plot_8$data$observed, na.rm = TRUE),
+    sum(cumulative_deficit_plot_9$data$observed, na.rm = TRUE)
+  )
+)
+
+bar_plot <- ggplot(total_deficits, aes(x = reorder(category, total_deficit), y = total_deficit)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  scale_y_continuous(labels = comma) +
+  labs(title = "Total Cumulative Deficits by Category (2020–2024)",
+       x = "ICD-10 Category",
+       y = "Total Cumulative Deficit in Hospitalizations") +
+  coord_flip() +
+  theme_minimal(base_size = 12)
+bar_plot
+
+ggsave("Total_Cumulative_Deficit_by_Category.png",
+       plot = bar_plot,
+       width = 8.5,
+       height = 6,
+       dpi = 300,
+       bg = "white")
+```
+
+```{r}
+cardio_deficit     <- tail(deficit_cumulative(fit_x,   start = make_date(2020, 3, 1), end = make_date(2024, 12, 28)), 1)$observed
+digestive_deficit  <- tail(deficit_cumulative(fit_2x,  start = make_date(2020, 3, 1), end = make_date(2024, 12, 28)), 1)$observed
+infectious_deficit <- tail(deficit_cumulative(fit_3x,  start = make_date(2020, 3, 1), end = make_date(2024, 12, 28)), 1)$observed
+inf_resp_deficit   <- tail(deficit_cumulative(fit_4x,  start = make_date(2020, 3, 1), end = make_date(2024, 12, 28)), 1)$observed
+injury_deficit     <- tail(deficit_cumulative(fit_5x,  start = make_date(2020, 3, 1), end = make_date(2024, 12, 28)), 1)$observed
+pneumonia_deficit  <- tail(deficit_cumulative(fit_6x,  start = make_date(2020, 3, 1), end = make_date(2024, 12, 28)), 1)$observed
+renal_deficit      <- tail(deficit_cumulative(fit_7x,  start = make_date(2020, 3, 1), end = make_date(2024, 12, 28)), 1)$observed
+respiratory_deficit<- tail(deficit_cumulative(fit_8x,  start = make_date(2020, 3, 1), end = make_date(2024, 12, 28)), 1)$observed
+other_deficit      <- tail(deficit_cumulative(fit_9x,  start = make_date(2020, 3, 1), end = make_date(2024, 12, 28)), 1)$observed
+
+deficit_summary <- tibble(
+  Category = c("Cardiovascular", "Digestive", "Infectious", "Infectious Respiratory", 
+               "Injury", "Pneumonia", "Renal", "Respiratory", "Other"),
+  Cumulative_Deficit = c(cardio_deficit, digestive_deficit, infectious_deficit,
+                         inf_resp_deficit, injury_deficit, pneumonia_deficit,
+                         renal_deficit, respiratory_deficit, other_deficit)
+)
+
+bar_plot2 <- ggplot(deficit_summary, aes(x = reorder(Category, -Cumulative_Deficit), 
+                            y = Cumulative_Deficit)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  geom_text(aes(label = scales::comma(round(Cumulative_Deficit))), 
+            vjust = -0.5, size = 3) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title = "Cumulative Deficit in Hospitalizations by Category",
+    subtitle = "Massachusetts, March 2020 – December 2024",
+    x = "ICD-10 Category",
+    y = "Cumulative Deficit (Observed - Expected)"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+bar_plot2
+
+ggsave("Cumulative Deficit in Hospitalizations by Category.png",
+       plot = bar_plot2,
+       width = 8.5,
+       height = 6,
+       dpi = 300,
+       bg = "white")
+```
+
+
+### ICD-10 codes table
+
+
+
+```{r}
+library(tidyverse)
+library(readxl)
+library(gt)
+library(stringr)
+
+# Load and clean data
+icd10categories <- read_excel("icd10categories_updated_321.xlsx") %>%
+  mutate(icd10code = toupper(trimws(icd10code)))
+
+# Function to generate code ranges and extract sort keys
+get_code_range_with_sort <- function(codes) {
+  codes <- sort(unique(codes))
+  letter <- substr(codes, 1, 1)
+  num <- as.integer(str_extract(substr(codes, 2, 4), "\\d+"))
+  df <- tibble(code = codes, letter = letter, num = num)
+  
+  ranges <- df %>%
+    group_by(letter) %>%
+    summarize(
+      min_num = min(num),
+      max_num = max(num),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      range = ifelse(min_num == max_num,
+                     paste0(letter, sprintf("%02d", min_num)),
+                     paste0(letter, sprintf("%02d", min_num), "–", letter, sprintf("%02d", max_num))),
+      sort_key = min_num + (utf8ToInt(letter) * 1000) # sort letter first, then number
+    )
+  
+  list(
+    range = paste(ranges$range, collapse = ", "),
+    sort_key = min(ranges$sort_key)
+  )
+}
+
+# Apply function and unpack results
+icd10_summary <- icd10categories %>%
+  group_by(category_0321update) %>%
+  summarize(
+    `Number of ICD-10 codes` = n_distinct(icd10code),
+    .groups = "drop",
+    temp = list(get_code_range_with_sort(icd10code))
+  ) %>%
+  mutate(
+    `ICD-10 code groups` = map_chr(temp, "range"),
+    sort_key = map_dbl(temp, "sort_key")
+  ) %>%
+  select(-temp) %>%
+  rename(category = category_0321update) %>%
+  arrange(sort_key)  # Sort by ICD-10 code order
+
+# Create GT table
+gt_table3 <- icd10_summary %>%
+  select(-sort_key) %>%
+  gt() %>%
+  tab_header(
+    title = md("**Table. ICD-10 Code Groupings and Counts by Category**")
+  ) %>%
+  cols_width(
+    `ICD-10 code groups` ~ px(400)
+  ) %>%
+  tab_options(table.width = pct(100))
+gt_table3
+
+# Save the GT table
+gtsave(gt_table3, filename = "icd10_category_groupings_continuous.png")
+```
+
+
+
+
+```{r}
+library(tidyverse)
+library(readxl)
+library(gt)
+library(stringr)
+
+# Load and clean data
+icd10categories <- read_excel("icd10categories_updated_321.xlsx") %>%
+  mutate(icd10code = toupper(trimws(icd10code)))
+
+# Modified condensation function with relaxed grouping logic
+condense_icd10_codes <- function(codes, max_gap = 2) {
+  codes <- sort(unique(codes))
+  letter_part <- substr(codes, 1, 1)
+  num_part <- as.integer(str_extract(substr(codes, 2, 4), "\\d+"))
+  
+  df <- tibble(code = codes, letter = letter_part, num = num_part) %>%
+    arrange(letter, num)
+  
+  # Relax grouping: allow small gaps (max_gap)
+  df <- df %>%
+    arrange(letter, num) %>%
+    group_by(letter) %>%
+    mutate(group = cumsum(c(TRUE, diff(num) > max_gap))) %>%
+    group_by(letter, group) %>%
+    summarize(
+      range = if (n() == 1) first(code) else paste0(first(code), "–", last(code)),
+      sort_val = first(num) + utf8ToInt(first(letter)) * 1000,
+      .groups = "drop"
+    )
+  
+  list(
+    range = paste(df$range, collapse = ", "),
+    sort_key = min(df$sort_val)
+  )
+}
+
+# Summarize and apply function
+icd10_summary <- icd10categories %>%
+  group_by(category_0321update) %>%
+  summarize(
+    `Number of ICD-10 codes` = n_distinct(icd10code),
+    temp = list(condense_icd10_codes(icd10code, max_gap = 2)),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    `ICD-10 code groups` = map_chr(temp, "range"),
+    sort_key = map_dbl(temp, "sort_key")
+  ) %>%
+  rename(category = category_0321update) %>%
+  arrange(sort_key)  # Alphabetical ICD-10 ordering
+
+# Create GT table
+gt_table <- icd10_summary %>%
+  select(-sort_key, -temp) %>%
+  gt() %>%
+  tab_header(
+    title = md("**Table 1. ICD-10 Code Groupings and Counts by Category**")
+  ) %>%
+  cols_width(
+    `ICD-10 code groups` ~ px(500)
+  ) %>%
+  tab_options(table.width = pct(100))
+gt_table
+# Save table
+gtsave(gt_table, filename = "icd10_category_groupings.png")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
