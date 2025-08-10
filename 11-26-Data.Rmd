@@ -1,0 +1,381 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+
+
+```{r}
+library(tidyverse)
+library(readr)
+library(readxl)
+library(MMWRweek)
+```
+
+```{r}
+allcause_state_byday <- read_csv("allcause_state_byday_suppressed_1126v3.csv")
+allcause_state_byweek <- read_csv("allcause_state_byweek_suppressed_1126v3.csv")
+allcause_county_byday <- read_csv("allcause_county_byday_suppressed_1126v3.csv")
+allcause_county_byweek <- read_csv("allcause_county_byweek_suppressed_1126v3.csv")
+ICD_10codes <- read_excel("icd10categories_updated_123.xlsx")
+```
+
+```{r}
+all_cause_county_byday <- allcause_county_byday %>%
+  rename(daily_count_countylevel = count)
+
+all_cause_state_byday <- allcause_state_byday %>%
+  rename(daily_count_statelevel = count)
+
+all_cause_state_byweek <- allcause_state_byweek %>%
+  rename(weekly_count_statelevel = count)
+
+all_cause_county_byweek <- allcause_county_byweek %>%
+  rename(weekly_count_countylevel = count)
+
+ICD_10_codes <- ICD_10codes %>%
+  rename(category = category_1113update) %>%
+  select(-category_original)
+```
+
+## State Level 
+
+```{r}
+# daily state-level data
+all_cause_state_byday <- all_cause_state_byday %>%
+  mutate(
+    count_numeric = as.numeric(ifelse(daily_count_statelevel == "<5", NA, daily_count_statelevel)),
+    count_suppressed = daily_count_statelevel == "<5",
+    visit_date = as.Date(visit_date, format = "%m/%d/%Y"),
+    category = as.character(category)
+  )
+all_cause_state_byday %>%
+  group_by(category) %>%
+  summarise(total_missing = sum(count_suppressed), 
+            total_count = sum(count_numeric, na.rm = TRUE)) 
+all_cause_state_byday
+```
+
+```{r}
+cutoff_date <- max(all_cause_state_byday$visit_date, na.rm = TRUE) %m-% months(12)
+
+#last 12 months
+daily_state_training_data <- all_cause_state_byday %>%
+  filter(visit_date < cutoff_date)
+
+# Validation set: data from the last 12 months
+daily_state_validation_data <- all_cause_state_byday %>%
+  filter(visit_date >= cutoff_date)
+
+# training data
+daily_state_training_data %>%
+  group_by(category) %>%
+  summarise(
+    total_missing = sum(count_suppressed),
+    total_count = sum(count_numeric, na.rm = TRUE)
+  )
+
+daily_state_training_data
+daily_state_validation_data
+```
+
+```{r}
+write_csv(daily_state_validation_data,
+          "daily_state_validation_data.csv",
+          append = TRUE)
+
+write_csv(daily_state_training_data,
+          "daily_state_training_data.csv",
+          append = TRUE)
+```
+
+
+```{r}
+ggplot(daily_state_training_data, aes(x= visit_date, y= count_numeric)) +
+  geom_line() +
+  facet_wrap(~category, scales = "free_y") +
+  labs(title = "Trends in Daily All-Cause Counts Across The State by Category", x = "visit date", y = "Daily count" )
+```
+
+```{r}
+#weekly state data
+all_cause_state_by_week <- all_cause_state_byweek %>%
+  separate(mmwr_week, into = c("MMWRyear", "MMWRweek"), sep = "-", convert = TRUE) %>%
+  mutate(
+    date = MMWRweek2Date(MMWRyear = MMWRyear, MMWRweek = MMWRweek, MMWRday = 1),
+    statecount_numeric = as.numeric(ifelse(weekly_count_statelevel == "<5", NA, weekly_count_statelevel)),
+    statecount_suppressed = weekly_count_statelevel == "<5",
+    category = as.character(category)
+  )
+
+all_cause_state_by_week %>%
+  group_by(category) %>%
+  reframe(missing_total = sum(statecount_suppressed), 
+            count_total = sum(statecount_numeric, na.rm = TRUE))
+all_cause_state_by_week
+```
+
+```{r}
+# cutoff date for the last 12 months
+cutoff_date <- max(all_cause_state_by_week$date, na.rm = TRUE) %m-% months(12)
+
+# Split into training and validation
+training_data_weekly <- all_cause_state_by_week %>%
+  filter(date < cutoff_date)
+
+validation_data_weekly <- all_cause_state_by_week %>%
+  filter(date >= cutoff_date)
+
+
+training_data_summary <- training_data_weekly %>%
+  group_by(category) %>%
+  summarise(
+    missing_total = sum(statecount_suppressed),
+    count_total = sum(statecount_numeric, na.rm = TRUE)
+  )
+
+validation_data_summary <- validation_data_weekly %>%
+  group_by(category) %>%
+  summarise(
+    missing_total = sum(statecount_suppressed),
+    count_total = sum(statecount_numeric, na.rm = TRUE)
+  )
+
+training_data_summary
+validation_data_summary
+
+training_data_weekly
+validation_data_weekly
+```
+
+```{r}
+write_csv(validation_data_weekly,
+          "validation_state_data_weekly.csv",
+          append = TRUE)
+
+write_csv(training_data_weekly,
+          "training_state_data_weekly.csv",
+          append = TRUE)
+```
+
+
+```{r}
+ggplot(training_data_weekly, aes(x= date , y = statecount_numeric)) +
+  geom_line() +
+facet_wrap(~category, scales = "free_y") +
+  labs(title = "Trends in Weekly All-Cause Counts Across The State by Category", x= "Date", y = "state count" )
+```
+
+```{r}
+ggplot(training_data_weekly, aes(x= MMWRweek , y = statecount_numeric, color = MMWRyear, group = MMWRyear))+
+  geom_line() +
+facet_wrap(~category, scales = "free_y") +
+  labs(title = "Trends in Weekly All-Cause Counts Across MA by Category", x= "MMWRweek", y = "state count" )
+```
+
+```{r}
+ggplot(training_data_weekly, aes(x = date, y = statecount_numeric)) +
+  geom_line(alpha = 0.5) +
+  geom_smooth(method = "loess", span = 0.2, color = "blue") +
+  facet_wrap(~category, scales = "free_y") +
+  labs(title = "Seasonal Trends in Weekly All-Cause Counts (Smoothed)", 
+       x = "Date", y = "State Count")
+```
+
+```{r}
+#Seasonality by Week of Year
+
+training_data_weekly %>%
+  mutate(week_of_year = week(date)) %>%
+  group_by(category, week_of_year) %>%
+  summarise(avg_count = mean(statecount_numeric, na.rm = TRUE)) %>%
+  ggplot(aes(x = week_of_year, y = avg_count)) +
+  geom_line() +
+  facet_wrap(~category, scales = "free_y") +
+  labs(title = "Average Weekly State Counts by Week of Year", 
+       x = "Week of Year", y = "Average Count")
+```
+
+```{r}
+# Yearly Comparisons Using Overlapping Lines
+training_data_weekly %>%
+  mutate(year = year(date), week = week(date)) %>%
+  ggplot(aes(x = week, y = statecount_numeric, color = as.factor(year), group = year)) +
+  geom_line() +
+  facet_wrap(~category, scales = "free_y") +
+  labs(title = "Yearly Weekly Trends Across Categories",
+       x = "Week of Year", y = "State Count",
+       color = "Year")
+```
+
+```{r}
+# Monthly Aggregated Trends
+training_data_weekly %>%
+  mutate(month = floor_date(date, "month")) %>%
+  group_by(category, month) %>%
+  summarise(monthly_avg = mean(statecount_numeric, na.rm = TRUE)) %>%
+  ggplot(aes(x = month, y = monthly_avg)) +
+  geom_line() +
+  facet_wrap(~category, scales = "free_y") +
+  labs(title = "Monthly Average State Counts by Category",
+       x = "Month", y = "Average Count")
+```
+
+```{r}
+# seasonal trends across weeks and years
+training_data_weekly %>%
+  mutate(week = week(date), year = year(date)) %>%
+  group_by(category, year, week) %>%
+  summarise(avg_count = mean(statecount_numeric, na.rm = TRUE)) %>%
+  ggplot(aes(x = week, y = as.factor(year), fill = avg_count)) +
+  geom_tile() +
+  facet_wrap(~category) +
+  scale_fill_viridis_c() +
+  labs(title = "Heatmap of Weekly Counts by Year",
+       x = "Week of Year", y = "Year",
+       fill = "Avg Count")
+```
+
+```{r}
+# distributions by week/month
+training_data_weekly %>%
+  mutate(month = month(date, label = TRUE)) %>%
+  ggplot(aes(x = month, y = statecount_numeric, fill = month)) +
+  geom_boxplot() +
+  facet_wrap(~category, scales = "free_y") +
+  labs(title = "Monthly Distribution of State Counts by Category",
+       x = "Month", y = "State Count") +
+  theme(legend.position = "none")
+```
+
+```{r}
+library(plotly)
+
+plot_ly(training_data_weekly, x = ~date, y = ~statecount_numeric,
+        color = ~category, type = 'scatter', mode = 'lines') %>%
+  layout(title = "Interactive Weekly Trends Across Categories",
+         xaxis = list(title = "Date"),
+         yaxis = list(title = "State Count"))
+```
+
+
+
+\newpage
+
+
+## County Level
+
+```{r}
+# Process daily county-level data
+all_cause_county_byday <- all_cause_county_byday %>%
+  mutate(
+    count_numeric = as.numeric(ifelse(daily_count_countylevel == "<5", NA, daily_count_countylevel)),
+    count_suppressed = daily_count_countylevel == "<5",
+    visit_date = as.Date(visit_date, format = "%m/%d/%Y"),
+    hospitalregion = as.character(hospitalregion),
+    category = as.character(category)
+  )
+
+all_cause_county_byday %>%
+  group_by(category) %>%
+  reframe(missing_total = sum(count_suppressed), 
+            count_total = sum(count_numeric, na.rm = TRUE))
+all_cause_county_byday
+```
+
+```{r}
+# cutoff date for the last 12 months of daily county-level data
+cutoff_date <- max(all_cause_county_byday$visit_date , na.rm = TRUE) %m-% months(12)
+
+# Split into training and validation
+training_data_county_daily <- all_cause_county_byday %>%
+  filter(visit_date < cutoff_date)
+
+validation_data_county_daily <- all_cause_county_byday %>%
+  filter(visit_date >= cutoff_date)
+
+
+training_data_summary <- training_data_county_daily %>%
+  group_by(category) %>%
+  summarise(
+    missing_total = sum(count_suppressed),
+    count_total = sum(count_numeric, na.rm = TRUE)
+  )
+
+validation_data_summary <- validation_data_county_daily %>%
+  group_by(category) %>%
+  summarise(
+    missing_total = sum(count_suppressed),
+    count_total = sum(count_numeric, na.rm = TRUE)
+  )
+
+training_data_summary
+validation_data_summary
+
+training_data_county_daily
+validation_data_county_daily
+```
+
+
+```{r}
+# Process weekly data for counties
+all_cause_county_by_week <- all_cause_county_byweek %>%
+  separate(mmwr_week, into = c("MMWRyear", "MMWRweek"), sep = "-", convert = TRUE) %>%
+  mutate(
+    date = MMWRweek2Date(MMWRyear = MMWRyear, MMWRweek = MMWRweek, MMWRday = 1),
+    county_numeric = as.numeric(ifelse(weekly_count_countylevel == "<5", NA, weekly_count_countylevel)),
+    county_suppressed = weekly_count_countylevel == "<5",
+    category = as.character(category)
+  )
+```
+
+```{r}
+# cutoff date for the last 12 months for weekly county data
+cutoff_date <- max(all_cause_county_by_week$date, na.rm = TRUE) %m-% months(12)
+
+# training & validation
+training_county_data_weekly <- all_cause_county_by_week %>%
+  filter(date < cutoff_date)
+
+validation_county_data_weekly <- all_cause_county_by_week %>%
+  filter(date >= cutoff_date)
+
+
+training_data_summary <- training_county_data_weekly %>%
+  group_by(category) %>%
+  summarise(
+    missing_total = sum(county_suppressed),
+    count_total = sum(county_numeric, na.rm = TRUE)
+  )
+
+validation_data_summary <- validation_county_data_weekly %>%
+  group_by(category) %>%
+  summarise(
+    missing_total = sum(county_suppressed),
+    count_total = sum(county_numeric, na.rm = TRUE)
+  )
+
+training_data_summary
+validation_data_summary
+
+training_county_data_weekly
+validation_county_data_weekly
+```
+
+
+```{r}
+write_csv(validation_county_data_weekly,
+          "validation_county_data_weekly.csv",
+          append = TRUE)
+
+write_csv(training_county_data_weekly,
+          "training_county_data_weekly.csv",
+          append = TRUE)
+```
+
+
+
+
+
+
