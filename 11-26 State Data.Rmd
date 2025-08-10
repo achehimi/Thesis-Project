@@ -1,0 +1,781 @@
+---
+title: "11-26 State Data"
+author: "Amani Chehimi"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(readr)
+library(readxl)
+library(MMWRweek)
+```
+
+```{r}
+allcause_state_byday <- read_csv("allcause_state_byday_suppressed_1126v3.csv")
+allcause_state_byweek <- read_csv("allcause_state_byweek_suppressed_1126v3.csv")
+allcause_county_byday <- read_csv("allcause_county_byday_suppressed_1126v3.csv")
+allcause_county_byweek <- read_csv("allcause_county_byweek_suppressed_1126v3.csv")
+ICD_10codes <- read_excel("icd10categories_updated_123.xlsx")
+```
+
+```{r}
+all_cause_county_byday <- allcause_county_byday %>%
+  rename(daily_count_countylevel = count)
+
+all_cause_state_byday <- allcause_state_byday %>%
+  rename(daily_count_statelevel = count)
+
+all_cause_state_byweek <- allcause_state_byweek %>%
+  rename(weekly_count_statelevel = count)
+
+all_cause_county_byweek <- allcause_county_byweek %>%
+  rename(weekly_count_countylevel = count)
+
+ICD_10_codes <- ICD_10codes %>%
+  rename(category = category_1113update) %>%
+  select(-category_original)
+```
+
+## State Level 
+
+```{r}
+# daily state-level data
+all_cause_state_byday <- all_cause_state_byday %>%
+  mutate(
+    count_numeric = as.numeric(ifelse(daily_count_statelevel == "<5", NA, daily_count_statelevel)),
+    count_suppressed = daily_count_statelevel == "<5",
+    visit_date = as.Date(visit_date, format = "%m/%d/%Y"),
+    category = as.character(category)
+  )
+all_cause_state_byday %>%
+  group_by(category) %>%
+  summarise(total_missing = sum(count_suppressed), 
+            total_count = sum(count_numeric, na.rm = TRUE)) 
+all_cause_state_byday
+```
+
+```{r}
+cutoff_date <- max(all_cause_state_byday$visit_date, na.rm = TRUE) %m-% months(12)
+
+# training last 12 months
+daily_state_training_data <- all_cause_state_byday %>%
+  filter(visit_date < cutoff_date)
+
+# Validation set: data from the last 12 months
+daily_state_validation_data <- all_cause_state_byday %>%
+  filter(visit_date >= cutoff_date)
+
+# training data
+daily_state_training_data %>%
+  group_by(category) %>%
+  summarise(
+    total_missing = sum(count_suppressed),
+    total_count = sum(count_numeric, na.rm = TRUE)
+  )
+
+daily_state_validation_data %>%
+  group_by(category) %>%
+  summarise(
+    missing_total = sum(count_suppressed),
+    count_total = sum(count_numeric, na.rm = TRUE)
+  )
+
+daily_state_training_data
+daily_state_validation_data
+```
+
+```{r}
+write_csv(daily_state_validation_data,
+          "daily_state_validation_data.csv",
+          append = TRUE)
+
+write_csv(daily_state_training_data,
+          "daily_state_training_data.csv",
+          append = TRUE)
+```
+
+
+```{r}
+ggplot(daily_state_training_data, aes(x= visit_date, y= count_numeric)) +
+  geom_line() +
+  facet_wrap(~category, scales = "free_y") +
+  labs(title = "Trends in Daily All-Cause Counts Across States by Category", x = "visit date", y = "Daily count" )
+```
+
+```{r}
+#weekly state data
+all_cause_state_by_week <- all_cause_state_byweek %>%
+  separate(mmwr_week, into = c("MMWRyear", "MMWRweek"), sep = "-", convert = TRUE) %>%
+  mutate(
+    date = MMWRweek2Date(MMWRyear = MMWRyear, MMWRweek = MMWRweek, MMWRday = 1),
+    statecount_numeric = as.numeric(ifelse(weekly_count_statelevel == "<5", NA, weekly_count_statelevel)),
+    statecount_suppressed = weekly_count_statelevel == "<5",
+    category = as.character(category)
+  )
+
+all_cause_state_by_week %>%
+  group_by(category) %>%
+  reframe(missing_total = sum(statecount_suppressed), 
+            count_total = sum(statecount_numeric, na.rm = TRUE))
+all_cause_state_by_week
+```
+
+```{r}
+# cutoff date for the last 12 months
+cutoff_date <- max(all_cause_state_by_week$date, na.rm = TRUE) %m-% months(12)
+
+# Split into training and validation
+training_data_weekly <- all_cause_state_by_week %>%
+  filter(date < cutoff_date)
+
+validation_data_weekly <- all_cause_state_by_week %>%
+  filter(date >= cutoff_date)
+
+
+training_data_summary <- training_data_weekly %>%
+  group_by(category) %>%
+  summarise(
+    missing_total = sum(statecount_suppressed),
+    count_total = sum(statecount_numeric, na.rm = TRUE)
+  )
+
+validation_data_summary <- validation_data_weekly %>%
+  group_by(category) %>%
+  summarise(
+    missing_total = sum(statecount_suppressed),
+    count_total = sum(statecount_numeric, na.rm = TRUE)
+  )
+
+training_data_summary
+validation_data_summary
+
+training_data_weekly
+validation_data_weekly
+```
+
+```{r}
+write_csv(validation_data_weekly,
+          "validation_state_data_weekly.csv",
+          append = TRUE)
+
+write_csv(training_data_weekly,
+          "training_state_data_weekly.csv",
+          append = TRUE)
+```
+
+
+```{r}
+ggplot(training_data_weekly, aes(x= date , y = statecount_numeric)) +
+  geom_line() +
+facet_wrap(~category, scales = "free_y") +
+  labs(title = "Trends in Weekly All-Cause Counts Across States by Category", x= "Date", y = "state count" )
+```
+
+```{r}
+ggplot(training_data_weekly, aes(x= MMWRweek , y = statecount_numeric, color = MMWRyear, group = MMWRyear))+
+  geom_line() +
+facet_wrap(~category, scales = "free_y") +
+  labs(title = "Trends in Weekly All-Cause Counts Across States by Category", x= "MMWRweek", y = "state count" )
+```
+
+```{r}
+ggplot(training_data_weekly, aes(x = date, y = statecount_numeric)) +
+  geom_line(alpha = 0.5) +
+  geom_smooth(method = "loess", span = 0.2, color = "blue") +
+  facet_wrap(~category, scales = "free_y") +
+  labs(title = "Seasonal Trends in Weekly All-Cause Counts (Smoothed)", 
+       x = "Date", y = "State Count")
+```
+
+```{r}
+#Seasonality by Week of Year
+
+training_data_weekly %>%
+  mutate(week_of_year = week(date)) %>%
+  group_by(category, week_of_year) %>%
+  summarise(avg_count = mean(statecount_numeric, na.rm = TRUE)) %>%
+  ggplot(aes(x = week_of_year, y = avg_count)) +
+  geom_line() +
+  facet_wrap(~category, scales = "free_y") +
+  labs(title = "Average Weekly State Counts by Week of Year", 
+       x = "Week of Year", y = "Average Count")
+```
+
+```{r}
+# Yearly Comparisons Using Overlapping Lines
+training_data_weekly %>%
+  mutate(year = year(date), week = week(date)) %>%
+  ggplot(aes(x = week, y = statecount_numeric, color = as.factor(year), group = year)) +
+  geom_line() +
+  facet_wrap(~category, scales = "free_y") +
+  labs(title = "Yearly Weekly Trends Across Categories",
+       x = "Week of Year", y = "State Count",
+       color = "Year")
+```
+
+```{r}
+# Monthly Aggregated Trends
+training_data_weekly %>%
+  mutate(month = floor_date(date, "month")) %>%
+  group_by(category, month) %>%
+  summarise(monthly_avg = mean(statecount_numeric, na.rm = TRUE)) %>%
+  ggplot(aes(x = month, y = monthly_avg)) +
+  geom_line() +
+  facet_wrap(~category, scales = "free_y") +
+  labs(title = "Monthly Average State Counts by Category",
+       x = "Month", y = "Average Count")
+```
+
+```{r}
+# seasonal trends across weeks and years
+training_data_weekly %>%
+  mutate(week = week(date), year = year(date)) %>%
+  group_by(category, year, week) %>%
+  summarise(avg_count = mean(statecount_numeric, na.rm = TRUE)) %>%
+  ggplot(aes(x = week, y = as.factor(year), fill = avg_count)) +
+  geom_tile() +
+  facet_wrap(~category) +
+  scale_fill_viridis_c() +
+  labs(title = "Heatmap of Weekly Counts by Year",
+       x = "Week of Year", y = "Year",
+       fill = "Avg Count")
+```
+
+```{r}
+# distributions by week/month
+training_data_weekly %>%
+  mutate(month = month(date, label = TRUE)) %>%
+  ggplot(aes(x = month, y = statecount_numeric, fill = month)) +
+  geom_boxplot() +
+  facet_wrap(~category, scales = "free_y") +
+  labs(title = "Monthly Distribution of State Counts by Category",
+       x = "Month", y = "State Count") +
+  theme(legend.position = "none")
+```
+
+```{r}
+library(plotly)
+
+plot_ly(training_data_weekly, x = ~date, y = ~statecount_numeric,
+        color = ~category, type = 'scatter', mode = 'lines') %>%
+  layout(title = "Interactive Weekly Trends Across Categories",
+         xaxis = list(title = "Date"),
+         yaxis = list(title = "State Count"))
+```
+
+# Time series Decompostion:
+
+```{r}
+library(ggfortify)
+library(forecast)
+library(tsibble)
+library(fabletools)
+library(lubridate)
+library(seasonal)
+```
+
+## Renal Data: 
+
+```{r}
+renal_ts <- training_data_weekly %>%
+  filter(category == "renal") %>%
+  arrange(MMWRyear, MMWRweek) %>%
+  pull(statecount_numeric) %>%
+  
+  #  Converting to a ts object
+  ts(start = c(2019, 1), frequency = 52)  # start = c(2019, 1): meaning year 2019, week 1
+
+# Classical multiplicative decomposition
+renal_decomp <- decompose(renal_ts, type = "multiplicative")
+
+autoplot(renal_decomp) +
+  xlab("Year-Week") +
+  ggtitle("Classical multiplicative decomposition of Renal 
+           (2019-01-01 to 2024-01-19)")
+
+```
+
+```{r, error=TRUE}
+# Still working on the X11 decomposition
+
+renal_monthly_ts <- training_data_weekly %>%
+  filter(category == "renal") %>%
+  mutate(year_month = floor_date(date, "month")) %>%
+  group_by(year_month) %>%
+  summarize(
+    monthly_count = sum(statecount_numeric, na.rm = TRUE)
+  ) %>%
+  ungroup() 
+renal_monthly_ts
+```
+
+```{r, error=TRUE}
+# Still in progress
+
+autoplot(renal_2020_ts, series="Data") + autolayer(trendcycle(fit), series="Trend") + autolayer(seasadj(fit), series="Seasonally Adjusted") + xlab("Year") + ylab("count") + ggtitle("seasonally adjusted data, along with the original data") + scale_colour_manual(values=c("gray","blue","red"), breaks=c("Data","Seasonally Adjusted","Trend"))
+```
+
+```{r, error=TRUE}
+fit %>% 
+  seasonal() %>%
+  ggsubseriesplot() + ylab("Seasonal")
+```
+
+
+```{r, error=TRUE}
+df_2020_monthly <- training_data_weekly %>%
+  filter(category == "renal", MMWRyear == 2020) %>%
+  mutate(year_month = floor_date(date, "month")) %>%
+  group_by(year_month) %>%
+  summarize(monthly_count = sum(statecount_numeric, na.rm = TRUE)) %>%
+  ungroup()
+
+renal_ts_2020 <- df_2020_monthly %>%
+  arrange(year_month) %>%
+  {
+    y <- .$monthly_count
+    start_year  <- year(.$year_month[1])
+    start_month <- month(.$year_month[1])
+    ts(data = y, start = c(start_year, start_month), frequency = 12)
+  }
+
+fit <- seas(renal_ts_2020, x11 = "")
+
+autoplot(fit) +
+  ggtitle("X11 Decomposition of Renal (Year 2020)")
+
+autoplot(renal_ts_2020, series = "Data") +
+  autolayer(trendcycle(fit), series = "Trend") +
+  autolayer(seasadj(fit), series = "Seasonally Adjusted") +
+  scale_colour_manual(values = c("gray", "blue", "red"),
+                      breaks = c("Data", "Seasonally Adjusted", "Trend")) +
+  ggtitle("Renal (X-11 Decomposition, 2020)") +
+  xlab("Year") +
+  ylab("Renal Counts")
+
+fit %>%
+  seasonal() %>%
+  ggsubseriesplot() +
+  ylab("Seasonal") +
+  ggtitle("Seasonal sub-series plot (X-11, Year 2020)")
+
+```
+
+
+## SEATS Decomposition
+
+```{r}
+ts(start = c(2019, 1), frequency = 52)
+
+renal_stl <- stl(renal_ts, s.window = "periodic")
+
+autoplot(renal_stl) +
+  ggtitle("STL Decomposition of Renal (Weekly Data)")
+
+```
+Compared to the Classical decomposition the SEATS decomposition captures the fall in the data in early 2020 better. It appears to have a smoother pattern and the seasonal component is allowed to vary slowly over time.
+
+
+## Forecasting with decomposition
+
+```{r}
+fit <- stl(renal_ts, t.window = 13, s.window = "periodic", robust = TRUE)
+
+fit %>%
+  seasadj() %>%
+  naive() %>%
+  autoplot() +
+  ylab("Renal") +
+  ggtitle("Naive forecast of seasonally adjusted data")
+
+fit %>%
+  forecast(method = "naive") %>%
+  autoplot() +
+  ylab("Renal") +
+  ggtitle("Forecast with naive method") # here the seasonal ARIMA model can also be used check section 6.8 amd Ch8. 
+
+```
+
+## Cardiovascular
+
+```{r}
+# weekly time series for "cardiovascular"
+cardio_ts <- training_data_weekly %>%
+  filter(category == "cardiovascular") %>%
+  arrange(MMWRyear, MMWRweek) %>%
+  pull(statecount_numeric) %>%
+  ts(start = c(2019, 1), frequency = 52)
+
+# 2) Classical multiplicative decomposition
+cardio_decomp <- decompose(cardio_ts, type = "multiplicative")
+
+autoplot(cardio_decomp) +
+  xlab("Year-Week") +
+  ggtitle("Classical multiplicative decomposition of Cardiovascular 
+           (2019-01-01 to 2024-01-19)")
+
+# 3) STL decomposition
+cardio_stl <- stl(cardio_ts, s.window = "periodic")
+
+autoplot(cardio_stl) +
+  ggtitle("STL Decomposition of Cardiovascular (Weekly Data)")
+
+# 4) Forecasting with STL decomposition
+fit <- stl(cardio_ts, t.window = 13, s.window = "periodic", robust = TRUE)
+
+fit %>%
+  seasadj() %>%
+  naive() %>%
+  autoplot() +
+  ylab("Cardiovascular") +
+  ggtitle("Naive forecast of seasonally adjusted data")
+
+fit %>%
+  forecast(method = "naive") %>%
+  autoplot() +
+  ylab("Cardiovascular") +
+  ggtitle("Forecast with naive method")
+
+```
+
+
+## digestive
+
+```{r}
+digestive_ts <- training_data_weekly %>%
+  filter(category == "digestive") %>%
+  arrange(MMWRyear, MMWRweek) %>%
+  pull(statecount_numeric) %>%
+  ts(start = c(2019, 1), frequency = 52)
+
+digestive_decomp <- decompose(digestive_ts, type = "multiplicative")
+
+autoplot(digestive_decomp) +
+  xlab("Year-Week") +
+  ggtitle("Classical multiplicative decomposition of Digestive 
+           (2019-01-01 to 2024-01-19)")
+
+digestive_stl <- stl(digestive_ts, s.window = "periodic")
+
+autoplot(digestive_stl) +
+  ggtitle("STL Decomposition of Digestive (Weekly Data)")
+
+fit <- stl(digestive_ts, t.window = 13, s.window = "periodic", robust = TRUE)
+
+fit %>%
+  seasadj() %>%
+  naive() %>%
+  autoplot() +
+  ylab("Digestive") +
+  ggtitle("Naive forecast of seasonally adjusted data")
+
+fit %>%
+  forecast(method = "naive") %>%
+  autoplot() +
+  ylab("Digestive") +
+  ggtitle("Forecast with naive method")
+
+```
+
+## infectious 
+
+```{r}
+# weekly time series for "infectious"
+infectious_ts <- training_data_weekly %>%
+  filter(category == "infectious") %>%
+  arrange(MMWRyear, MMWRweek) %>%
+  pull(statecount_numeric) %>%
+  ts(start = c(2019, 1), frequency = 52)
+
+# Classical multiplicative decomposition
+infectious_decomp <- decompose(infectious_ts, type = "multiplicative")
+
+autoplot(infectious_decomp) +
+  xlab("Year-Week") +
+  ggtitle("Classical multiplicative decomposition of Infectious 
+           (2019-01-01 to 2024-01-19)")
+
+# STL decomposition
+infectious_stl <- stl(infectious_ts, s.window = "periodic")
+
+autoplot(infectious_stl) +
+  ggtitle("STL Decomposition of Infectious (Weekly Data)")
+
+# Forecasting with STL decomposition
+fit <- stl(infectious_ts, t.window = 13, s.window = "periodic", robust = TRUE)
+
+fit %>%
+  seasadj() %>%
+  naive() %>%
+  autoplot() +
+  ylab("Infectious") +
+  ggtitle("Naive forecast of seasonally adjusted data")
+
+fit %>%
+  forecast(method = "naive") %>%
+  autoplot() +
+  ylab("Infectious") +
+  ggtitle("Forecast with naive method")
+```
+
+## other
+
+```{r}
+other_ts <- training_data_weekly %>%
+  filter(category == "other") %>%
+  arrange(MMWRyear, MMWRweek) %>%
+  pull(statecount_numeric) %>%
+  ts(start = c(2019, 1), frequency = 52)
+
+other_decomp <- decompose(other_ts, type = "multiplicative")
+
+autoplot(other_decomp) +
+  xlab("Year-Week") +
+  ggtitle("Classical multiplicative decomposition of Other 
+           (2019-01-01 to 2024-01-19)")
+
+other_stl <- stl(other_ts, s.window = "periodic")
+
+autoplot(other_stl) +
+  ggtitle("STL Decomposition of Other (Weekly Data)")
+
+fit <- stl(other_ts, t.window = 13, s.window = "periodic", robust = TRUE)
+
+fit %>%
+  seasadj() %>%
+  naive() %>%
+  autoplot() +
+  ylab("Other") +
+  ggtitle("Naive forecast of seasonally adjusted data")
+
+fit %>%
+  forecast(method = "naive") %>%
+  autoplot() +
+  ylab("Other") +
+  ggtitle("Forecast with naive method")
+```
+
+## infectious respiratory
+
+```{r}
+infectious_resp_ts <- training_data_weekly %>%
+  filter(category == "infectious respiratory") %>%
+  arrange(MMWRyear, MMWRweek) %>%
+  pull(statecount_numeric) %>%
+  ts(start = c(2019, 1), frequency = 52)
+
+infectious_resp_decomp <- decompose(infectious_resp_ts, type = "multiplicative")
+
+autoplot(infectious_resp_decomp) +
+  xlab("Year-Week") +
+  ggtitle("Classical multiplicative decomposition of Infectious Respiratory 
+           (2019-01-01 to 2024-01-19)")
+
+infectious_resp_stl <- stl(infectious_resp_ts, s.window = "periodic")
+
+autoplot(infectious_resp_stl) +
+  ggtitle("STL Decomposition of Infectious Respiratory (Weekly Data)")
+
+fit <- stl(infectious_resp_ts, t.window = 13, s.window = "periodic", robust = TRUE)
+
+fit %>%
+  seasadj() %>%
+  naive() %>%
+  autoplot() +
+  ylab("Infectious Respiratory") +
+  ggtitle("Naive forecast of seasonally adjusted data")
+
+fit %>%
+  forecast(method = "naive") %>%
+  autoplot() +
+  ylab("Infectious Respiratory") +
+  ggtitle("Forecast with naive method")
+```
+
+## injury
+
+```{r}
+injury_ts <- training_data_weekly %>%
+  filter(category == "injury") %>%
+  arrange(MMWRyear, MMWRweek) %>%
+  pull(statecount_numeric) %>%
+  ts(start = c(2019, 1), frequency = 52)
+
+injury_decomp <- decompose(injury_ts, type = "multiplicative")
+
+autoplot(injury_decomp) +
+  xlab("Year-Week") +
+  ggtitle("Classical multiplicative decomposition of Injury 
+           (2019-01-01 to 2024-01-19)")
+
+injury_stl <- stl(injury_ts, s.window = "periodic")
+
+autoplot(injury_stl) +
+  ggtitle("STL Decomposition of Injury (Weekly Data)")
+
+fit <- stl(injury_ts, t.window = 13, s.window = "periodic", robust = TRUE)
+
+fit %>%
+  seasadj() %>%
+  naive() %>%
+  autoplot() +
+  ylab("Injury") +
+  ggtitle("Naive forecast of seasonally adjusted data")
+
+fit %>%
+  forecast(method = "naive") %>%
+  autoplot() +
+  ylab("Injury") +
+  ggtitle("Forecast with naive method")
+```
+
+## pneumonia
+
+```{r}
+pneumonia_ts <- training_data_weekly %>%
+  filter(category == "pneumonia") %>%
+  arrange(MMWRyear, MMWRweek) %>%
+  pull(statecount_numeric) %>%
+  ts(start = c(2019, 1), frequency = 52)
+
+pneumonia_decomp <- decompose(pneumonia_ts, type = "multiplicative")
+
+autoplot(pneumonia_decomp) +
+  xlab("Year-Week") +
+  ggtitle("Classical multiplicative decomposition of Pneumonia 
+           (2019-01-01 to 2024-01-19)")
+
+pneumonia_stl <- stl(pneumonia_ts, s.window = "periodic")
+
+autoplot(pneumonia_stl) +
+  ggtitle("STL Decomposition of Pneumonia (Weekly Data)")
+
+fit <- stl(pneumonia_ts, t.window = 13, s.window = "periodic", robust = TRUE)
+
+fit %>%
+  seasadj() %>%
+  naive() %>%
+  autoplot() +
+  ylab("Pneumonia") +
+  ggtitle("Naive forecast of seasonally adjusted data")
+
+fit %>%
+  forecast(method = "naive") %>%
+  autoplot() +
+  ylab("Pneumonia") +
+  ggtitle("Forecast with naive method")
+```
+
+
+# compute the strength of trend and strength of seasonality for each dataset, save in a table:
+
+**Explanation of the function**
+
+This function takes a time series object (**additive**) and does the following steps:
+
+1. **STL decomposition**:  
+   \[
+   y_t = T_t + S_t + R_t,
+   \]
+   where:
+   - \(T_t\) is the trend component,  
+   - \(S_t\) is the seasonal component,  
+   - \(R_t\) is the remainder (or residual) component.
+
+2. **Compute variances**:  
+   - \(\mathrm{Var}(R_t)\)  
+   - \(\mathrm{Var}(T_t + R_t)\) (the seasonally-adjusted series)  
+   - \(\mathrm{Var}(S_t + R_t)\) (the detrended series)
+
+3. **Calculate the strengths**:
+   - **Strength of trend** (\(F_T\)):  
+     \[
+     F_T = \max\!\biggl(0,\; 1 - \tfrac{\mathrm{Var}(R_t)}{\mathrm{Var}(T_t + R_t)}\biggr).
+     \]
+   - **Strength of seasonality** (\(F_S\)):  
+     \[
+     F_S = \max\!\biggl(0,\; 1 - \tfrac{\mathrm{Var}(R_t)}{\mathrm{Var}(S_t + R_t)}\biggr).
+     \]
+
+\(F_T\) and \(F_S\) both lie in \([0,1]\). Values close to **1** indicate a **strong trend or seasonality**, while values close to **0** indicate a **weak** or **nonexistent** trend or seasonality.
+
+```{r}
+calc_strength <- function(ts_data, s.window = "periodic") {
+  dec <- stl(ts_data, s.window = s.window)  
+  comps <- dec$time.series
+  T <- comps[, "trend"]
+  S <- comps[, "seasonal"]
+  R <- comps[, "remainder"]
+  
+  # Remove potential NAs
+  idx <- complete.cases(T, S, R)
+  T <- T[idx]
+  S <- S[idx]
+  R <- R[idx]
+  
+  varR       <- var(R)
+  varTplusR  <- var(T + R)
+  varSplusR  <- var(S + R)
+
+  F_T <- max(0, 1 - varR / varTplusR)
+  F_S <- max(0, 1 - varR / varSplusR)
+  
+  list(F_T = F_T, F_S = F_S)
+}
+
+
+# 2) Computed strengths by category
+
+categories <- c("renal", "cardiovascular", "digestive",
+                "infectious", "infectious respiratory",
+                "injury", "pneumonia", "other")
+
+results_list <- list()
+
+for (cat_name in categories) {
+  cat_ts <- training_data_weekly %>%
+    filter(category == cat_name) %>%
+    arrange(MMWRyear, MMWRweek) %>%
+    pull(statecount_numeric) %>%
+    ts(start = c(2019, 1), frequency = 52)
+  
+  strengths <- calc_strength(cat_ts, s.window = "periodic")
+  
+  results_list[[cat_name]] <- data.frame(
+    category = cat_name,
+    F_T = strengths$F_T,
+    F_S = strengths$F_S
+  )
+}
+
+results_df <- do.call(rbind, results_list)
+results_df
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
