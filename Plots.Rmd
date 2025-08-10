@@ -1,0 +1,940 @@
+---
+title: "Plots"
+author: "Amani Chehimi"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(tidyverse)
+library(knitr)
+library(ggplot2)
+library(dplyr)
+library(lubridate)
+library(MMWRweek)
+library(gridExtra)
+library(readxl)
+library(excessmort)
+```
+
+
+```{r}
+allcause_state_byweek <- read_excel("allcause_state_byweek_suppressed_25mar21.xlsx")
+icd10categories <- read_excel("icd10categories_updated_321.xlsx")
+
+#weekly state data
+all_cause_state_byweek <- allcause_state_byweek %>%
+  rename(weekly_count_statelevel = count)
+
+all_cause_state_by_week <- all_cause_state_byweek %>%
+  separate(mmwr_week, into = c("MMWRyear", "MMWRweek"), sep = "-", convert = TRUE) %>%
+  mutate(
+    date = MMWRweek2Date(MMWRyear = MMWRyear, MMWRweek = MMWRweek, MMWRday = 1),
+    statecount_numeric = as.numeric(ifelse(weekly_count_statelevel == "<5", NA, weekly_count_statelevel)),
+    statecount_suppressed = weekly_count_statelevel == "<5",
+    category = as.character(category)
+  )
+
+all_cause_state_by_week %>%
+  group_by(category) %>%
+  reframe(missing_total = sum(statecount_suppressed), 
+            count_total = sum(statecount_numeric, na.rm = TRUE))
+all_cause_state_by_week
+```
+
+
+
+```{r}
+exclude_dates <- seq(lubridate::make_date(2020, 3, 1), 
+                     lubridate::make_date(2021, 2, 20), 
+                     by = "day")
+
+# cardiovascular data
+cardio <- all_cause_state_by_week %>%
+  filter(category == "cardiovascular") %>%
+    filter(!(MMWRyear == 2019 & MMWRweek == 1 | MMWRyear == 2025 & MMWRweek == 1)) %>%
+  mutate(population = 7001399, # given from https://www.census.gov/quickfacts/fact/table/MA/PST045223
+         outcome = statecount_numeric)
+
+# excess model with COVID-19 dates excluded
+cardio_excess <- compute_expected(cardio, 
+                               exclude = exclude_dates,
+                               frequency = 52)
+cardio_excess
+
+cardio_excess <- cardio_excess %>%
+  mutate(date = as.Date(paste(MMWRyear, MMWRweek, 1, sep = "-"), "%Y-%U-%u"))
+
+# Plotting
+combined_plot_1 <- ggplot(cardio_excess, aes(x = date)) +
+  geom_line(aes(y = expected), color = "blue", size = 1.5) +  # Expected outcome line
+  geom_point(aes(y = outcome, color = factor(excluded)), size = 2) +  # Observed outcomes
+  scale_color_manual(values = c("FALSE" = "green", "TRUE" = "red"),
+                     labels = c("Included in Model", "Excluded from Model")) +
+  labs(title = "Weekly Cardiovascular Hospitalizations in MA",
+       x = "Date",
+       y = "Outcome",
+       color = "Data Point Status") +
+  theme_minimal()
+
+print(combined_plot_1)
+```
+
+```{r}
+library(plotly)
+
+p_1 <- ggplot(cardio, aes(x = MMWRweek, y = statecount_numeric, group = factor(MMWRyear), color = factor(MMWRyear))) +
+  geom_line() +
+  theme_classic() +
+  labs(title = "Weekly Cardio Admission Counts in MA")
+
+interactive_plot_1 <- ggplotly(p_1)
+interactive_plot_1
+ggsave("p_1.png", plot = p_1, width = 8, height = 6, dpi = 300)
+```
+
+```{r}
+fit_1 <- cardio_excess %>% 
+  excess_model(exclude = exclude_dates,
+               start = as.Date("2019-01-14"),
+               end = as.Date("2024-12-31"),
+               knots.per.year = 12,
+               verbose = FALSE)
+```
+
+
+```{r}
+fit_x <- cardio_excess %>% 
+  deficit_model(exclude = exclude_dates,
+               start = as.Date("2019-01-14"),
+               end = as.Date("2024-12-31"),
+               knots.per.year = 12,
+               verbose = FALSE)
+
+# -- Visualizing deviations from expected hospitalization in Massachusetts
+excess_plot_x <- excess_plot(fit_x, 
+            title = "Deviations from Expected Counts for Cardio in MA"
+)
+excess_plot_x
+fit_x$detected_intervals
+```
+
+
+```{r}
+# -- Fitting model
+# deficit_fit_1 <- cardio_excess %>% 
+#   deficit_model(exclude = exclude_dates,
+#                start = as.Date("2019-01-14"),
+#               end = as.Date("2024-12-31"),
+#               knots.per.year = 12,
+#               verbose = FALSE)
+# str(deficit_fit_1)
+```
+
+
+```{r}
+# -- Visualizing deviations from expected hospitalization in Massachusetts
+excess_plot_1 <- excess_plot(fit_1, 
+            title = "Deviations from Expected Counts for Cardio in MA"
+)
+excess_plot_1
+# -- Intervals of inordinate mortality found by the excess model
+fit_1$detected_intervals
+```
+
+
+```{r}
+# -- Computing excess Hospitilization counts in Massachusetts from March 1, 2020 to May 9, 2020
+cumulative_deficit  <- excess_cumulative(fit_1, 
+                                        start = make_date(2020, 03, 01),
+                                        end   = make_date(2021, 2, 20))
+
+# -- Visualizing cumulative excess deaths in MA
+cumulative_deficit_plot_1 <- cumulative_deficit %>%
+  ggplot(aes(date)) +
+  geom_ribbon(aes(ymin = observed- 2*sd, ymax = observed + 2*sd), alpha = 0.5) +
+  geom_line(aes(y = observed),
+            color = "white",
+            size  = 1) +
+  geom_line(aes(y = observed)) +
+  geom_point(aes(y = observed)) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(x        = "Date",
+       y        = "Cumulative excess Hospitilization-Cardio",
+       title    = "Cumulative Excess Hospitilization Cardio in MA",
+       subtitle = "During the first wave of Covid-19")
+cumulative_deficit_plot_1
+```
+
+
+## Digestive: 
+
+```{r}
+# COVID-19 exclusion dates
+exclude_dates <- seq(lubridate::make_date(2020, 3, 1), 
+                     lubridate::make_date(2021, 2, 27), 
+                     by = "day")
+
+# digestive data
+digestive <- all_cause_state_by_week %>%
+  filter(category == "digestive") %>%
+    filter(!(MMWRyear == 2019 & MMWRweek == 1 | MMWRyear == 2025 & MMWRweek == 1)) %>%
+  mutate(population = 7001399, # given from https://www.census.gov/quickfacts/fact/table/MA/PST045223
+         outcome = statecount_numeric)
+
+# excess model with COVID-19 dates excluded
+digestive_excess <- compute_expected(digestive, 
+                               exclude = exclude_dates,
+                               frequency = 52)
+
+# Plotting
+combined_plot_2 <- ggplot(digestive_excess, aes(x = date)) +
+  geom_line(aes(y = expected), color = "blue", size = 1.5) +  # Expected outcome line
+  geom_point(aes(y = outcome, color = factor(excluded)), size = 2) +  # Observed outcomes
+  scale_color_manual(values = c("FALSE" = "green", "TRUE" = "red"),
+                     labels = c("Included in Model", "Excluded from Model")) +
+  labs(title = "Weekly digestive ED Hospitilizations in MA",
+       x = "Date",
+       y = "Outcome",
+       color = "Data Point Status") +
+  theme_minimal()
+
+print(combined_plot_2)
+```
+
+```{r}
+p_2 <- ggplot(digestive, aes(x = MMWRweek, y = statecount_numeric, group = factor(MMWRyear), color = factor(MMWRyear))) +
+  geom_line() +
+  theme_classic() +
+    labs(title = "Weekly Digestive Admission Counts in MA")
+
+interactive_plot_2 <- ggplotly(p_2)
+interactive_plot_2
+```
+
+
+
+```{r}
+fit_2 <- digestive_excess %>% 
+  excess_model(exclude = exclude_dates,
+               start = min(.$date),
+               end = max(.$date),
+               knots.per.year = 12,
+               verbose = FALSE)
+```
+
+
+```{r}
+# -- Visualizing deviations from expected hospitalization in Massachusetts
+excess_plot_2 <- excess_plot(fit_2, 
+            title = "Deviations from Expected Counts for Digestive in MA"
+)
+excess_plot_2
+# -- Intervals of inordinate mortality found by the excess model
+fit_2$detected_intervals
+```
+
+
+```{r}
+# -- Computing excess Hospitilization counts in Massachusetts from March 1, 2020 to May 9, 2020
+cumulative_deficit  <- excess_cumulative(fit_2, 
+                                        start = make_date(2020, 03, 01),
+                                        end   = make_date(2021, 2, 27))
+
+# -- Visualizing cumulative excess deaths in MA
+cumulative_deficit_plot_2 <- cumulative_deficit %>%
+  ggplot(aes(date)) +
+  geom_ribbon(aes(ymin = observed- 2*sd, ymax = observed + 2*sd), alpha = 0.5) +
+  geom_line(aes(y = observed),
+            color = "white",
+            size  = 1) +
+  geom_line(aes(y = observed)) +
+  geom_point(aes(y = observed)) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(x        = "Date",
+       y        = "Cumulative excess Hospitilization-Digestive",
+       title    = "Cumulative Excess Hospitilization Digestive in MA",
+       subtitle = "During the first wave of Covid-19")
+cumulative_deficit_plot_2
+```
+
+
+## infectious
+
+```{r}
+# COVID-19 exclusion dates
+exclude_dates <- seq(lubridate::make_date(2020, 3, 1), 
+                     lubridate::make_date(2021, 6, 5), 
+                     by = "day")
+
+# infectious data
+infectious <- all_cause_state_by_week %>%
+  filter(category == "infectious") %>%
+    filter(!(MMWRyear == 2019 & MMWRweek == 1 | MMWRyear == 2025 & MMWRweek == 1)) %>%
+  mutate(population = 7001399, # given from https://www.census.gov/quickfacts/fact/table/MA/PST045223
+         outcome = statecount_numeric)
+
+# excess model with COVID-19 dates excluded
+infectious_excess <- compute_expected(infectious,
+                               exclude = exclude_dates,
+                               frequency = 52)
+
+# Plotting
+combined_plot_3 <- ggplot(infectious_excess, aes(x = date)) +
+  geom_line(aes(y = expected), color = "blue", size = 1.5) +  # Expected outcome line
+  geom_point(aes(y = outcome, color = factor(excluded)), size = 2) +  # Observed outcomes
+  scale_color_manual(values = c("FALSE" = "green", "TRUE" = "red"),
+                     labels = c("Included in Model", "Excluded from Model")) +
+  labs(title = "Weekly Infectious ED Hospitilizations in MA",
+       x = "Date",
+       y = "Outcome",
+       color = "Data Point Status") +
+  theme_minimal()
+print(combined_plot_3)
+```
+
+```{r}
+p_3 <- ggplot(infectious, aes(x = MMWRweek, y = statecount_numeric, group = factor(MMWRyear), color = factor(MMWRyear))) +
+  geom_line() +
+  theme_classic() +
+    labs(title = "Weekly Infectious Admission Counts in MA")
+
+interactive_plot_3 <- ggplotly(p_3)
+interactive_plot_3
+```
+
+
+```{r}
+# -- Fitting excess model
+fit_3 <- infectious_excess %>% 
+  excess_model(exclude = exclude_dates,
+               start = as.Date("2020-03-01"),
+               end = as.Date("2024-12-31"),
+               knots.per.year = 12,
+               verbose = FALSE)
+```
+
+
+```{r}
+# -- Visualizing deviations from expected hospitalization in Massachusetts
+excess_plot_3 <- excess_plot(fit_3, 
+            title = "Deviations from Expected Counts for Infectious in MA"
+)
+excess_plot_3
+# -- Intervals of inordinate mortality found by the excess model
+fit_3$detected_intervals
+```
+
+
+```{r}
+# -- Computing excess Hospitilization counts in Massachusetts from March 1, 2020 to May 9, 2020
+cumulative_deficit  <- excess_cumulative(fit_3, 
+                                        start = make_date(2020, 03, 01),
+                                        end   = make_date(2021, 2, 27))
+
+# -- Visualizing cumulative excess deaths in MA
+cumulative_deficit_plot_3 <- cumulative_deficit %>%
+  ggplot(aes(date)) +
+  geom_ribbon(aes(ymin = observed- 2*sd, ymax = observed + 2*sd), alpha = 0.5) +
+  geom_line(aes(y = observed),
+            color = "white",
+            size  = 1) +
+  geom_line(aes(y = observed)) +
+  geom_point(aes(y = observed)) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(x        = "Date",
+       y        = "Cumulative excess Hospitilization-Infectious",
+       title    = "Cumulative Excess Hospitilization Infectious in MA",
+       subtitle = "During the first wave of Covid-19")
+cumulative_deficit_plot_3
+```
+
+## infectious_respiratory
+
+```{r}
+# COVID-19 exclusion dates
+exclude_dates <- seq(lubridate::make_date(2020, 3, 1), 
+                     lubridate::make_date(2021, 6, 12), 
+                     by = "day")
+
+# infectious respiratory data
+infectious_respiratory <- all_cause_state_by_week %>%
+  filter(category == "infectious respiratory") %>%
+    filter(!(MMWRyear == 2019 & MMWRweek == 1 | MMWRyear == 2025 & MMWRweek == 1)) %>%
+  mutate(population = 7001399, # given from https://www.census.gov/quickfacts/fact/table/MA/PST045223
+         outcome = statecount_numeric)
+
+# excess model with COVID-19 dates excluded
+infectious_respiratory_excess <- compute_expected(infectious_respiratory,
+                               exclude = exclude_dates,
+                               frequency = 52)
+
+# Plotting
+combined_plot_4 <- ggplot(infectious_respiratory_excess, aes(x = date)) +
+  geom_line(aes(y = expected), color = "blue", size = 1.5) +  # Expected outcome line
+  geom_point(aes(y = outcome, color = factor(excluded)), size = 2) +  # Observed outcomes
+  scale_color_manual(values = c("FALSE" = "green", "TRUE" = "red"),
+                     labels = c("Included in Model", "Excluded from Model")) +
+  labs(title = "Weekly Infectious Respiratory ED Hospitilizations in MA",
+       x = "Date",
+       y = "Outcome",
+       color = "Data Point Status") +
+  theme_minimal()
+print(combined_plot_4)
+```
+
+```{r}
+p_4 <- ggplot(infectious_respiratory, aes(x = MMWRweek, y = statecount_numeric, group = factor(MMWRyear), color = factor(MMWRyear))) +
+  geom_line() +
+  theme_classic() +
+    labs(title = "Weekly Infectious Respiratory Admission Counts in MA")
+
+interactive_plot_4 <- ggplotly(p_4)
+interactive_plot_4
+```
+
+
+
+```{r}
+# -- Fitting excess model
+fit_4 <- infectious_respiratory_excess %>% 
+  excess_model(exclude = exclude_dates,
+               start = as.Date("2020-03-01"),
+               end = as.Date("2025-12-31"),
+               knots.per.year = 12,
+               verbose = FALSE)
+```
+
+
+```{r}
+# -- Visualizing deviations from expected hospitalization in Massachusetts
+excess_plot_4 <- excess_plot(fit_4, 
+            title = "Deviations from Expected Counts for Infectious Respiratory in MA"
+)
+excess_plot_4 
+# -- Intervals of inordinate mortality found by the excess model
+fit_4$detected_intervals
+```
+
+```{r}
+# -- Computing excess Hospitilization counts in Massachusetts from March 1, 2020 to May 9, 2020
+cumulative_deficit  <- excess_cumulative(fit_4, 
+                                        start = make_date(2020, 03, 01),
+                                        end   = make_date(2021, 6, 12))
+
+# -- Visualizing cumulative excess deaths in MA
+cumulative_deficit_plot_4 <- cumulative_deficit %>%
+  ggplot(aes(date)) +
+  geom_ribbon(aes(ymin = observed- 2*sd, ymax = observed + 2*sd), alpha = 0.5) +
+  geom_line(aes(y = observed),
+            color = "white",
+            size  = 1) +
+  geom_line(aes(y = observed)) +
+  geom_point(aes(y = observed)) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(x        = "Date",
+       y        = "Cumulative excess Hospitilization-Infectious Respiratory",
+       title    = "Cumulative Excess Hospitilization Infectious Respiratory in MA",
+       subtitle = "During the first wave of Covid-19")
+cumulative_deficit_plot_4
+```
+
+## injury
+
+```{r}
+# COVID-19 exclusion dates
+exclude_dates <- seq(lubridate::make_date(2020, 3, 1), 
+                     lubridate::make_date(2021, 4, 10), 
+                     by = "day")
+
+# injury data
+injury <- all_cause_state_by_week %>%
+  filter(category == "injury") %>%
+    filter(!(MMWRyear == 2019 & MMWRweek == 1 | MMWRyear == 2025 & MMWRweek == 1)) %>%
+  mutate(population = 7001399, # given from https://www.census.gov/quickfacts/fact/table/MA/PST045223
+         outcome = statecount_numeric)
+
+# excess model with COVID-19 dates excluded
+injury_excess <- compute_expected(injury,
+                               exclude = exclude_dates,
+                               frequency = 52)
+
+# Plotting
+combined_plot_5 <- ggplot(injury_excess, aes(x = date)) +
+  geom_line(aes(y = expected), color = "blue", size = 1.5) +  # Expected outcome line
+  geom_point(aes(y = outcome, color = factor(excluded)), size = 2) +  # Observed outcomes
+  scale_color_manual(values = c("FALSE" = "green", "TRUE" = "red"),
+                     labels = c("Included in Model", "Excluded from Model")) +
+  labs(title = "Weekly Injury ED Hospitilizations in MA",
+       x = "Date",
+       y = "Outcome",
+       color = "Data Point Status") +
+  theme_minimal()
+print(combined_plot_5)
+```
+
+```{r}
+p_5 <- ggplot(injury, aes(x = MMWRweek, y = statecount_numeric, group = factor(MMWRyear), color = factor(MMWRyear))) +
+  geom_line() +
+  theme_classic() +
+    labs(title = "Weekly Injury Admission Counts in MA")
+
+interactive_plot_5 <- ggplotly(p_5)
+interactive_plot_5
+```
+
+
+
+```{r}
+# -- Fitting excess model
+fit_5 <- injury_excess %>% 
+  excess_model(exclude = exclude_dates,
+               start = as.Date("2020-03-01"),
+               end = as.Date("2024-12-31"),
+               knots.per.year = 12,
+               verbose = FALSE)
+```
+
+
+```{r}
+# -- Visualizing deviations from expected hospitalization in Massachusetts
+excess_plot_5 <- excess_plot(fit_5, 
+            title = "Deviations from Expected Counts for Injuries in MA"
+)
+excess_plot_5
+# -- Intervals of inordinate mortality found by the excess model
+fit_5$detected_intervals
+```
+
+```{r}
+# -- Computing excess Hospitilization counts in Massachusetts from March 1, 2020 to May 9, 2020
+cumulative_deficit  <- excess_cumulative(fit_5, 
+                                        start = make_date(2020, 03, 01),
+                                        end   = make_date(2021, 4, 10))
+
+# -- Visualizing cumulative excess deaths in MA
+cumulative_deficit_plot_5 <- cumulative_deficit %>%
+  ggplot(aes(date)) +
+  geom_ribbon(aes(ymin = observed- 2*sd, ymax = observed + 2*sd), alpha = 0.5) +
+  geom_line(aes(y = observed),
+            color = "white",
+            size  = 1) +
+  geom_line(aes(y = observed)) +
+  geom_point(aes(y = observed)) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(x        = "Date",
+       y        = "Cumulative excess Hospitilization-Injuries",
+       title    = "Cumulative Excess Hospitilization Injuries in MA",
+       subtitle = "During the first wave of Covid-19")
+cumulative_deficit_plot_5
+```
+
+
+## pneumonia
+
+
+```{r}
+# COVID-19 exclusion dates
+exclude_dates <- seq(lubridate::make_date(2020, 3, 1), 
+                     lubridate::make_date(2022, 5, 7), 
+                     by = "day")
+
+# pneumonia data
+pneumonia <- all_cause_state_by_week %>%
+  filter(category == "pneumonia") %>%
+    filter(!(MMWRyear == 2019 & MMWRweek == 1 | MMWRyear == 2025 & MMWRweek == 1)) %>%
+  mutate(population = 7001399, # given from https://www.census.gov/quickfacts/fact/table/MA/PST045223
+         outcome = statecount_numeric)
+
+# excess model with COVID-19 dates excluded
+pneumonia_excess <- compute_expected(pneumonia,
+                               exclude = exclude_dates,
+                               frequency = 52)
+
+# Plotting
+combined_plot_6 <- ggplot(pneumonia_excess, aes(x = date)) +
+  geom_line(aes(y = expected), color = "blue", size = 1.5) +  # Expected outcome line
+  geom_point(aes(y = outcome, color = factor(excluded)), size = 2) +  # Observed outcomes
+  scale_color_manual(values = c("FALSE" = "green", "TRUE" = "red"),
+                     labels = c("Included in Model", "Excluded from Model")) +
+  labs(title = "Weekly Pneumonia ED Hospitilizations in MA",
+       x = "Date",
+       y = "Outcome",
+       color = "Data Point Status") +
+  theme_minimal()
+print(combined_plot_6)
+```
+
+```{r}
+p_6 <- ggplot(pneumonia, aes(x = MMWRweek, y = statecount_numeric, group = factor(MMWRyear), color = factor(MMWRyear))) +
+  geom_line() +
+  theme_classic() +
+    labs(title = "Weekly Penumonia Admission Counts in MA")
+
+interactive_plot_6 <- ggplotly(p_6)
+interactive_plot_6
+```
+
+
+
+
+```{r}
+# -- Fitting excess model
+fit_6 <- pneumonia_excess %>% 
+  excess_model(exclude = exclude_dates,
+               start = as.Date("2020-03-01"),
+               end = as.Date("2024-12-31"),
+               knots.per.year = 12,
+               verbose = FALSE)
+```
+
+
+```{r}
+# -- Visualizing deviations from expected hospitalization in Massachusetts
+excess_plot_6 <- excess_plot(fit_6, 
+            title = "Deviations from Expected Counts for Pneumonia in MA"
+)
+excess_plot_6
+# -- Intervals of inordinate mortality found by the excess model
+fit_6$detected_intervals
+```
+
+```{r}
+# -- Computing excess Hospitilization counts in Massachusetts from March 1, 2020 to May 9, 2020
+cumulative_deficit  <- excess_cumulative(fit_6, 
+                                        start = make_date(2020, 03, 01),
+                                        end   = make_date(2022, 5, 7))
+
+# -- Visualizing cumulative excess deaths in MA
+cumulative_deficit_plot_6 <- cumulative_deficit %>%
+  ggplot(aes(date)) +
+  geom_ribbon(aes(ymin = observed- 2*sd, ymax = observed + 2*sd), alpha = 0.5) +
+  geom_line(aes(y = observed),
+            color = "white",
+            size  = 1) +
+  geom_line(aes(y = observed)) +
+  geom_point(aes(y = observed)) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(x        = "Date",
+       y        = "Cumulative excess Hospitilization-Pneumonia",
+       title    = "Cumulative Excess Hospitilization Pneumonia in MA",
+       subtitle = "During the first wave of Covid-19")
+cumulative_deficit_plot_6
+```
+
+
+## Renal 
+
+```{r}
+# COVID-19 exclusion dates
+exclude_dates <- seq(lubridate::make_date(2020, 3, 1), 
+                     lubridate::make_date(2021, 2, 27), 
+                     by = "day")
+
+# renal data
+renal <- all_cause_state_by_week %>%
+  filter(category == "renal") %>%
+    filter(!(MMWRyear == 2019 & MMWRweek == 1 | MMWRyear == 2025 & MMWRweek == 1)) %>%
+  mutate(population = 7001399, # given from https://www.census.gov/quickfacts/fact/table/MA/PST045223
+         outcome = statecount_numeric)
+
+# excess model with COVID-19 dates excluded
+renal_excess <- compute_expected(renal,
+                               exclude = exclude_dates,
+                               frequency = 52)
+
+# Plotting
+combined_plot_7 <- ggplot(renal_excess, aes(x = date)) +
+  geom_line(aes(y = expected), color = "blue", size = 1.5) +  # Expected outcome line
+  geom_point(aes(y = outcome, color = factor(excluded)), size = 2) +  # Observed outcomes
+  scale_color_manual(values = c("FALSE" = "green", "TRUE" = "red"),
+                     labels = c("Included in Model", "Excluded from Model")) +
+  labs(title = "Weekly Renal ED Hospitilizations in MA",
+       x = "Date",
+       y = "Outcome",
+       color = "Data Point Status") +
+  theme_minimal()
+print(combined_plot_7)
+```
+
+```{r}
+p_7 <- ggplot(renal, aes(x = MMWRweek, y = statecount_numeric, group = factor(MMWRyear), color = factor(MMWRyear))) +
+  geom_line() +
+  theme_classic() +
+    labs(title = "Weekly Renal Admission Counts in MA")
+
+interactive_plot_7 <- ggplotly(p_7)
+interactive_plot_7
+```
+
+
+
+
+```{r}
+# -- Fitting excess model
+fit_7 <- renal_excess %>% 
+  excess_model(exclude = exclude_dates,
+               start = as.Date("2020-03-01"),
+               end = as.Date("2024-12-31"),
+               knots.per.year = 12,
+               verbose = FALSE)
+```
+
+
+```{r}
+# -- Visualizing deviations from expected hospitalization in Massachusetts
+excess_plot_7 <- excess_plot(fit_7, 
+            title = "Deviations from Expected Counts for Renal in MA"
+)
+excess_plot_7
+# -- Intervals of inordinate mortality found by the excess model
+fit_7$detected_intervals
+```
+
+```{r}
+# -- Computing excess Hospitilization counts in Massachusetts from March 1, 2020 to May 9, 2020
+cumulative_deficit  <- excess_cumulative(fit_7, 
+                                        start = make_date(2020, 03, 01),
+                                        end   = make_date(2021, 2, 27))
+
+# -- Visualizing cumulative excess deaths in MA
+cumulative_deficit_plot_7 <- cumulative_deficit %>%
+  ggplot(aes(date)) +
+  geom_ribbon(aes(ymin = observed- 2*sd, ymax = observed + 2*sd), alpha = 0.5) +
+  geom_line(aes(y = observed),
+            color = "white",
+            size  = 1) +
+  geom_line(aes(y = observed)) +
+  geom_point(aes(y = observed)) +
+  scale_y_continuous(labels = scales::comma) +
+ labs(x        = "Date",
+       y        = "Cumulative excess Hospitilization-Renal",
+       title    = "Cumulative Excess Hospitilization Renal in MA",
+       subtitle = "During the first wave of Covid-19")
+cumulative_deficit_plot_7
+```
+
+
+
+## Respiratory
+
+```{r}
+# COVID-19 exclusion dates
+exclude_dates <- seq(lubridate::make_date(2020, 3, 1), 
+                     lubridate::make_date(2021, 6, 12), 
+                     by = "day")
+
+# respiratory data
+respiratory <- all_cause_state_by_week %>%
+  filter(category == "respiratory") %>%
+    filter(!(MMWRyear == 2019 & MMWRweek == 1 | MMWRyear == 2025 & MMWRweek == 1)) %>%
+  mutate(population = 7001399, # given from https://www.census.gov/quickfacts/fact/table/MA/PST045223
+         outcome = statecount_numeric)
+
+# excess model with COVID-19 dates excluded
+respiratory_excess <- compute_expected(respiratory,
+                               exclude = exclude_dates,
+                               frequency = 52)
+
+# Plotting
+combined_plot_8 <- ggplot(respiratory_excess, aes(x = date)) +
+  geom_line(aes(y = expected), color = "blue", size = 1.5) +  # Expected outcome line
+  geom_point(aes(y = outcome, color = factor(excluded)), size = 2) +  # Observed outcomes
+  scale_color_manual(values = c("FALSE" = "green", "TRUE" = "red"),
+                     labels = c("Included in Model", "Excluded from Model")) +
+  labs(title = "Weekly Respiratory ED Hospitilizations in MA",
+       x = "Date",
+       y = "Outcome",
+       color = "Data Point Status") +
+  theme_minimal()
+print(combined_plot_8)
+```
+
+```{r}
+p_8 <- ggplot(respiratory, aes(x = MMWRweek, y = statecount_numeric, group = factor(MMWRyear), color = factor(MMWRyear))) +
+  geom_line() +
+  theme_classic() +
+    labs(title = "Weekly Respiratory Admission Counts in MA")
+
+interactive_plot_8 <- ggplotly(p_8)
+interactive_plot_8
+```
+
+
+
+```{r}
+# -- Fitting excess model
+fit_8 <- respiratory_excess %>% 
+  excess_model(exclude = exclude_dates,
+               start = as.Date("2020-03-01"),
+               end = as.Date("2024-12-31"),
+               knots.per.year = 12,
+               verbose = FALSE)
+```
+
+
+```{r}
+# -- Visualizing deviations from expected hospitalization in Massachusetts
+excess_plot_8 <- excess_plot(fit_8, 
+            title = "Deviations from Expected Counts for Respiratory in MA"
+)
+excess_plot_8
+# -- Intervals of inordinate mortality found by the excess model
+fit_8$detected_intervals
+```
+
+```{r}
+# -- Computing excess Hospitilization counts in Massachusetts from March 1, 2020 to May 9, 2020
+cumulative_deficit  <- excess_cumulative(fit_8, 
+                                        start = make_date(2020, 03, 01),
+                                        end   = make_date(2021, 6, 12))
+
+# -- Visualizing cumulative excess deaths in MA
+cumulative_deficit_plot_8 <- cumulative_deficit %>%
+  ggplot(aes(date)) +
+  geom_ribbon(aes(ymin = observed- 2*sd, ymax = observed + 2*sd), alpha = 0.5) +
+  geom_line(aes(y = observed),
+            color = "white",
+            size  = 1) +
+  geom_line(aes(y = observed)) +
+  geom_point(aes(y = observed)) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(x        = "Date",
+       y        = "Cumulative excess Hospitilization-Respiratory",
+       title    = "Cumulative Excess Hospitilization Respiratory in MA",
+       subtitle = "During the first wave of Covid-19")
+cumulative_deficit_plot_8
+```
+
+
+
+## other
+
+```{r}
+# COVID-19 exclusion dates
+exclude_dates <- seq(lubridate::make_date(2020, 3, 1), 
+                     lubridate::make_date(2021, 6, 5), 
+                     by = "day")
+
+# other data
+other <- all_cause_state_by_week %>%
+  filter(category == "other") %>%
+    filter(!(MMWRyear == 2019 & MMWRweek == 1 | MMWRyear == 2025 & MMWRweek == 1)) %>%
+  mutate(population = 7001399, # given from https://www.census.gov/quickfacts/fact/table/MA/PST045223
+         outcome = statecount_numeric)
+
+# excess model with COVID-19 dates excluded
+other_excess <- compute_expected(other,
+                               exclude = exclude_dates,
+                               frequency = 52)
+
+# Plotting
+combined_plot_9 <- ggplot(other_excess, aes(x = date)) +
+  geom_line(aes(y = expected), color = "blue", size = 1.5) +  # Expected outcome line
+  geom_point(aes(y = outcome, color = factor(excluded)), size = 2) +  # Observed outcomes
+  scale_color_manual(values = c("FALSE" = "green", "TRUE" = "red"),
+                     labels = c("Included in Model", "Excluded from Model")) +
+  labs(title = "Weekly Other ED Hospitilizations in MA",
+       x = "Date",
+       y = "Outcome",
+       color = "Data Point Status") +
+  theme_minimal()
+print(combined_plot_9)
+```
+
+```{r}
+p_9 <- ggplot(other, aes(x = MMWRweek, y = statecount_numeric, group = factor(MMWRyear), color = factor(MMWRyear))) +
+  geom_line() +
+  theme_classic() +
+     labs(title = "Weekly Other Admission Counts in MA")
+
+interactive_plot_9 <- ggplotly(p_9)
+interactive_plot_9
+```
+
+
+
+```{r}
+# -- Fitting excess model
+fit_9 <-  other_excess %>% 
+  excess_model(exclude = exclude_dates,
+               start = as.Date("2020-03-01"),
+               end = as.Date("2024-12-31"),
+               knots.per.year = 12,
+               verbose = FALSE)
+```
+
+
+```{r}
+# -- Visualizing deviations from expected hospitalization in Massachusetts
+excess_plot_9 <- excess_plot(fit_9, 
+            title = "Deviations from Expected Counts for Other in MA"
+)
+excess_plot_9
+# -- Intervals of inordinate mortality found by the excess model
+fit_9$detected_intervals
+```
+
+```{r}
+# -- Computing excess Hospitilization counts in Massachusetts from March 1, 2020 to May 9, 2020
+cumulative_deficit  <- excess_cumulative(fit_3, 
+                                        start = make_date(2020, 03, 01),
+                                        end   = make_date(2021, 6, 5))
+
+# -- Visualizing cumulative excess deaths in MA
+cumulative_deficit_plot_9 <- cumulative_deficit %>%
+  ggplot(aes(date)) +
+  geom_ribbon(aes(ymin = observed- 2*sd, ymax = observed + 2*sd), alpha = 0.5) +
+  geom_line(aes(y = observed),
+            color = "white",
+            size  = 1) +
+  geom_line(aes(y = observed)) +
+  geom_point(aes(y = observed)) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(x        = "Date",
+       y        = "Cumulative excess Hospitilization-other",
+       title    = "Cumulative Excess Hospitilization other in MA",
+       subtitle = "During the first wave of Covid-19")
+
+cumulative_deficit_plot_9
+```
+
+
+## Table Summary: 
+
+```{r}
+table1 <- tibble(
+  Category = c("Cardiovascular", "Digestive", "Infectious", "Infectious respiratory", "Respiratory", "Renal", "Injury", "Other", "Pneumonia", "Covid"),
+  `End date of the excluding period` = as.Date(c("2021-02-20", "2021-02-27", "2021-06-05","2021-06-12", "2021-04-10", "2022-05-07", "2021-02-27", "2021-06-05", "2021-03-06", "2022-06-04"), format = "%Y-%m-%d"))
+
+print(table1)
+```
+
+
+
+
+```{r}
+ggsave("combined_plot_1.png", plot = combined_plot_1, width = 8, height = 6, dpi = 300)
+ggsave("combined_plot_2.png", plot = combined_plot_2, width = 8, height = 6, dpi = 300)
+ggsave("combined_plot_3.png", plot = combined_plot_3, width = 8, height = 6, dpi = 300)
+ggsave("combined_plot_4.png", plot = combined_plot_4, width = 8, height = 6, dpi = 300)
+ggsave("combined_plot_5.png", plot = combined_plot_5, width = 8, height = 6, dpi = 300)
+ggsave("combined_plot_6.png", plot = combined_plot_6, width = 8, height = 6, dpi = 300)
+ggsave("combined_plot_7.png", plot = combined_plot_7, width = 8, height = 6, dpi = 300)
+ggsave("combined_plot_8.png", plot = combined_plot_8, width = 8, height = 6, dpi = 300)
+ggsave("combined_plot_9.png", plot = combined_plot_9, width = 8, height = 6, dpi = 300)
+```
+
+
+
+
+
+
+
